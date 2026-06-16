@@ -1,0 +1,14 @@
+2026/06/16-22:27:56.897 2e64e Reusing MANIFEST /home/rootlulu/projects/news-digest-web/data/xueqiu-browser-profile/Default/IndexedDB/https_xueqiu.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/06/16-22:27:56.898 2e64e Recovering log #10
+2026/06/16-22:27:56.898 2e64e Reusing old log /home/rootlulu/projects/news-digest-web/data/xueqiu-browser-profile/Default/IndexedDB/https_xueqiu.com_0.indexeddb.leveldb/000010.log 
+2026/06/16-22:27:56.898 2e64e Delete type=2 #8
+2026/06/16-22:27:56.950 2e64d Level-0 table #15: started
+2026/06/16-22:27:56.962 2e64d Level-0 table #15: 1082 bytes OK
+2026/06/16-22:27:56.967 2e64d Delete type=0 #10
+2026/06/16-22:27:56.968 2e64d Manual compaction at level-0 from '\x00\x04\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x05\x00\x00\x00' @ 0 : 0; will stop at '\x00\x04\x00\x00\xc8\x04\x00d\x00a\x00t\x00a' @ 212 : 1
+2026/06/16-22:27:56.968 2e64d Compacting 1@0 + 1@1 files
+2026/06/16-22:27:56.972 2e64d Generated table #16@0: 21 keys, 630 bytes
+2026/06/16-22:27:56.972 2e64d Compacted 1@0 + 1@1 files => 630 bytes
+2026/06/16-22:27:56.975 2e64d compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/06/16-22:27:56.975 2e64d Delete type=2 #15
+2026/06/16-22:27:56.975 2e64d Manual compaction at level-0 from '\x00\x04\x00\x00\xc8\x04\x00d\x00a\x00t\x00a' @ 212 : 1 .. '\x00\x05\x00\x00\x00' @ 0 : 0; will stop at (end)

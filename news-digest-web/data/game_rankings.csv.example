@@ -1,0 +1,5 @@
+provider,country_code,country,chart,rank,game,game_zh,publisher,genre,platform,app_id,url,artwork_url,updated_at,note
+qimai,cn,中国,free,1,Honor of Kings,王者荣耀,腾讯,MOBA,iOS,989673964,https://www.qimai.cn/rank/index/brand/free/genre/6014/device/iphone/country/cn,,2026-06-15T00:00:00+08:00,示例：七麦免费榜
+qimai,cn,中国,grossing,1,Honor of Kings,王者荣耀,腾讯,MOBA,iOS,989673964,https://www.qimai.cn/rank/index/brand/grossing/genre/6014/device/iphone/country/cn,,2026-06-15T00:00:00+08:00,示例：七麦畅销榜
+diandian,us,美国,free,1,MONOPOLY GO!,,Scopely,Casual,iOS,1621328561,https://app.diandian.com/rank/global/ios,,2026-06-15T00:00:00+08:00,示例：点点免费榜
+diandian,us,美国,grossing,1,MONOPOLY GO!,,Scopely,Casual,iOS,1621328561,https://app.diandian.com/rank/global/ios,,2026-06-15T00:00:00+08:00,示例：点点畅销榜

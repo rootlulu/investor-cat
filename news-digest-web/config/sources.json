@@ -1,0 +1,207 @@
+{
+  "fetch": {
+    "days": 7,
+    "max_items_per_section": 60,
+    "max_concurrency": 12,
+    "per_domain_concurrency": 8,
+    "request_timeout_seconds": 8,
+    "source_timeout_seconds": 30,
+    "cache_ttl_seconds": 1800,
+    "min_refresh_interval_seconds": 1800,
+    "retries": 1,
+    "enable_gdelt_fallback": false
+  },
+  "storage": {
+    "sqlite_path": "data/news.sqlite"
+  },
+  "games": {
+    "rank_limit": 100,
+    "sensor_tower": {
+      "auth_token_env": "SENSORTOWER_AUTH_TOKEN",
+      "api_docs": "https://app.sensortower.com/api/docs/app_analysis"
+    },
+    "countries": [
+      {"code": "cn", "name": "中国", "marketRank": 1},
+      {"code": "us", "name": "美国", "marketRank": 2},
+      {"code": "jp", "name": "日本", "marketRank": 3},
+      {"code": "kr", "name": "韩国", "marketRank": 4},
+      {"code": "de", "name": "德国", "marketRank": 5},
+      {"code": "gb", "name": "英国", "marketRank": 6},
+      {"code": "fr", "name": "法国", "marketRank": 7},
+      {"code": "ca", "name": "加拿大", "marketRank": 8},
+      {"code": "tw", "name": "中国台湾", "marketRank": 9},
+      {"code": "hk", "name": "中国香港", "marketRank": 10},
+      {"code": "au", "name": "澳大利亚", "marketRank": 11},
+      {"code": "br", "name": "巴西", "marketRank": 12},
+      {"code": "mx", "name": "墨西哥", "marketRank": 13},
+      {"code": "it", "name": "意大利", "marketRank": 14},
+      {"code": "es", "name": "西班牙", "marketRank": 15},
+      {"code": "sa", "name": "沙特", "marketRank": 16},
+      {"code": "ae", "name": "阿联酋", "marketRank": 17},
+      {"code": "tr", "name": "土耳其", "marketRank": 18},
+      {"code": "in", "name": "印度", "marketRank": 19},
+      {"code": "id", "name": "印尼", "marketRank": 20},
+      {"code": "th", "name": "泰国", "marketRank": 21},
+      {"code": "vn", "name": "越南", "marketRank": 22},
+      {"code": "sg", "name": "新加坡", "marketRank": 23},
+      {"code": "my", "name": "马来西亚", "marketRank": 24},
+      {"code": "ph", "name": "菲律宾", "marketRank": 25},
+      {"code": "nl", "name": "荷兰", "marketRank": 26},
+      {"code": "ch", "name": "瑞士", "marketRank": 27},
+      {"code": "se", "name": "瑞典", "marketRank": 28},
+      {"code": "pl", "name": "波兰", "marketRank": 29},
+      {"code": "no", "name": "挪威", "marketRank": 30}
+    ]
+  },
+  "sources": [
+    {
+      "id": "returns",
+      "name": "Returns",
+      "domains": ["returns.news"],
+      "enabled": true,
+      "priority": 25,
+      "note": "路边社/Returns。若正式域名不同，只改这里的 domains 即可。"
+    },
+    {
+      "id": "reuters",
+      "name": "Reuters",
+      "domains": ["reuters.com"],
+      "enabled": true,
+      "priority": 24
+    },
+    {
+      "id": "bloomberg",
+      "name": "Bloomberg",
+      "domains": ["bloomberg.com"],
+      "enabled": true,
+      "priority": 24
+    },
+    {
+      "id": "bbc",
+      "name": "BBC",
+      "domains": ["bbc.com", "bbc.co.uk"],
+      "enabled": true,
+      "priority": 10
+    },
+    {
+      "id": "ap",
+      "name": "AP",
+      "domains": ["apnews.com"],
+      "enabled": true,
+      "priority": 9
+    },
+    {
+      "id": "cnbc",
+      "name": "CNBC",
+      "domains": ["cnbc.com"],
+      "enabled": true,
+      "priority": 8
+    },
+    {
+      "id": "financial-times",
+      "name": "Financial Times",
+      "domains": ["ft.com"],
+      "enabled": true,
+      "priority": 8
+    },
+    {
+      "id": "wsj",
+      "name": "WSJ",
+      "domains": ["wsj.com"],
+      "enabled": true,
+      "priority": 7
+    },
+    {
+      "id": "nyt",
+      "name": "New York Times",
+      "domains": ["nytimes.com"],
+      "enabled": true,
+      "priority": 7
+    },
+    {
+      "id": "guardian",
+      "name": "The Guardian",
+      "domains": ["theguardian.com"],
+      "enabled": true,
+      "priority": 6
+    },
+    {
+      "id": "nikkei-asia",
+      "name": "Nikkei Asia",
+      "domains": ["asia.nikkei.com"],
+      "enabled": true,
+      "priority": 6
+    },
+    {
+      "id": "scmp",
+      "name": "SCMP",
+      "domains": ["scmp.com"],
+      "enabled": true,
+      "priority": 12
+    },
+    {
+      "id": "caixin",
+      "name": "Caixin",
+      "domains": ["caixinglobal.com"],
+      "enabled": true,
+      "priority": 11
+    },
+    {
+      "id": "china-daily",
+      "name": "China Daily",
+      "domains": ["chinadaily.com.cn"],
+      "enabled": true,
+      "priority": 6
+    },
+    {
+      "id": "xinhua",
+      "name": "Xinhua",
+      "domains": ["english.news.cn"],
+      "enabled": true,
+      "priority": 6
+    },
+    {
+      "id": "global-times",
+      "name": "Global Times",
+      "domains": ["globaltimes.cn"],
+      "enabled": true,
+      "priority": 5
+    },
+    {
+      "id": "yicai-global",
+      "name": "Yicai Global",
+      "domains": ["yicaiglobal.com"],
+      "enabled": true,
+      "priority": 5
+    },
+    {
+      "id": "hong-kong-free-press",
+      "name": "Hong Kong Free Press",
+      "domains": ["hongkongfp.com"],
+      "enabled": true,
+      "priority": 5
+    },
+    {
+      "id": "rthk",
+      "name": "RTHK",
+      "domains": ["rthk.hk"],
+      "enabled": true,
+      "priority": 5
+    },
+    {
+      "id": "macau-business",
+      "name": "Macau Business",
+      "domains": ["macaubusiness.com"],
+      "enabled": true,
+      "priority": 5
+    },
+    {
+      "id": "google-news",
+      "name": "Google News",
+      "domains": ["news.google.com"],
+      "site_filter": false,
+      "enabled": true,
+      "priority": 1
+    }
+  ]
+}

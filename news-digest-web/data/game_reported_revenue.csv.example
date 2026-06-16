@@ -1,0 +1,3 @@
+market,month,rank,game,game_zh,publisher,genre,platform,app_id,official_revenue_usd,currency,source_type,source_name,source_url,note
+global,2026-06,1,Honor of Kings,王者荣耀,Tencent,MOBA,iOS / Android,989673964,125000000,USD,official,Tencent quarterly report,https://www.tencent.com/en-us/investors.html,"示例：官方披露优先替换 Sensor Tower"
+china,2026-06,1,Honor of Kings,王者荣耀,腾讯,MOBA,iOS / Android,989673964,98000000,USD,media,权威媒体报道,https://example.com/report,"示例：权威媒体披露优先于 Sensor Tower 估算"

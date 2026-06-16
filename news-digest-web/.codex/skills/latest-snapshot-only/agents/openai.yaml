@@ -1,0 +1,4 @@
+interface:
+  display_name: "Latest Snapshot Only"
+  short_description: "Keep project persistence limited to latest snapshots."
+  default_prompt: "Use $latest-snapshot-only before changing database, cache, or snapshot persistence in this project."

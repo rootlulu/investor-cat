@@ -1,0 +1,7 @@
+This legacy mixed template is no longer used for the games page.
+
+Use these focused imports instead:
+
+- data/game_reported_revenue.csv for official or authoritative media disclosed revenue.
+- data/game_sensor_tower_revenue.csv for Sensor Tower global/china estimated revenue Top 100.
+- data/game_rankings.csv for Qimai and Diandian country free/grossing charts.

@@ -1,0 +1,3 @@
+market,month,rank,game,game_zh,publisher,genre,platform,app_id,sensor_tower_revenue_usd,currency,downloads,source_url,note
+global,2026-06,1,Honor of Kings,王者荣耀,Tencent,MOBA,iOS / Android,989673964,120000000,USD,,https://app.sensortower.com/,"示例：Sensor Tower 全球游戏流水预估"
+china,2026-06,1,Honor of Kings,王者荣耀,腾讯,MOBA,iOS / Android,989673964,95000000,USD,,https://app.sensortower.com/,"示例：Sensor Tower 中国游戏流水预估"

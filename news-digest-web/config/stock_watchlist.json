@@ -1,0 +1,76 @@
+{
+  "stocks": [
+    {
+      "id": "us-momo",
+      "market": "us",
+      "symbol": "MOMO",
+      "name": "挚文集团",
+      "secid": "105.MOMO",
+      "gubaCode": "MOMO",
+      "xueqiuSymbol": "MOMO"
+    },
+    {
+      "id": "hk-02400",
+      "market": "hk",
+      "symbol": "02400",
+      "name": "心动公司",
+      "secid": "116.02400",
+      "gubaCode": "HK02400",
+      "xueqiuSymbol": "HK02400"
+    },
+    {
+      "id": "hk-00700",
+      "market": "hk",
+      "symbol": "00700",
+      "name": "腾讯控股",
+      "secid": "116.00700",
+      "gubaCode": "HK00700",
+      "xueqiuSymbol": "HK00700"
+    },
+    {
+      "id": "sh-603816",
+      "market": "a_share",
+      "symbol": "603816",
+      "name": "顾家家居",
+      "secid": "1.603816",
+      "gubaCode": "603816",
+      "xueqiuSymbol": "SH603816"
+    },
+    {
+      "id": "sh-601677",
+      "market": "a_share",
+      "symbol": "601677",
+      "name": "明泰铝业",
+      "secid": "1.601677",
+      "gubaCode": "601677",
+      "xueqiuSymbol": "SH601677"
+    },
+    {
+      "id": "sh-600595",
+      "market": "a_share",
+      "symbol": "600595",
+      "name": "中孚实业",
+      "secid": "1.600595",
+      "gubaCode": "600595",
+      "xueqiuSymbol": "SH600595"
+    },
+    {
+      "id": "sz-000807",
+      "market": "a_share",
+      "symbol": "000807",
+      "name": "云铝股份",
+      "secid": "0.000807",
+      "gubaCode": "000807",
+      "xueqiuSymbol": "SZ000807"
+    },
+    {
+      "id": "sz-000933",
+      "market": "a_share",
+      "symbol": "000933",
+      "name": "神火股份",
+      "secid": "0.000933",
+      "gubaCode": "000933",
+      "xueqiuSymbol": "SZ000933"
+    }
+  ]
+}
