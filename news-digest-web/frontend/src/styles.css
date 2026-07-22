@@ -440,6 +440,288 @@ footer {
   gap: 10px;
 }
 
+.stock-subtabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 5px;
+  border: 1px solid var(--page-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--page-accent) 4%, #ffffff);
+}
+
+.stock-subtabs button {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stock-subtabs button:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.stock-subtabs button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--page-accent) 24%, transparent);
+  outline-offset: 1px;
+}
+
+.stock-subtabs button.is-active {
+  border-color: color-mix(in srgb, var(--page-accent) 30%, var(--line));
+  color: var(--ink);
+  background: #ffffff;
+  box-shadow: 0 4px 14px rgba(23, 32, 42, 0.06);
+}
+
+.stock-subtabs strong {
+  font-size: 15px;
+}
+
+.stock-subtabs span {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stock-subtabs em {
+  display: inline-grid;
+  min-width: 20px;
+  margin-left: 3px;
+  border-radius: 999px;
+  padding: 1px 6px;
+  color: #ffffff;
+  background: var(--page-accent);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 18px;
+  place-items: center;
+}
+
+.stock-tab-panel > .watchlist-section {
+  margin-top: 0;
+}
+
+.institution-allocation {
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.institution-allocation-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--page-accent) 5%, #ffffff);
+}
+
+.institution-allocation-heading .eyebrow {
+  margin: 0 0 4px;
+}
+
+.institution-allocation-heading h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.institution-allocation-heading p:not(.eyebrow) {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.allocation-period {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--page-accent) 24%, var(--line));
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--page-accent);
+  background: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.allocation-category-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.allocation-category-card {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--soft-line);
+  border-radius: 8px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--page-accent) 2%, #ffffff);
+}
+
+.allocation-category-card header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.allocation-category-card header span,
+.allocation-category-card p,
+.allocation-category-card small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.allocation-category-card p {
+  margin: 0;
+}
+
+.allocation-category-card > b {
+  color: var(--page-accent);
+  font-size: 17px;
+}
+
+.allocation-category-card small {
+  line-height: 1.55;
+}
+
+.allocation-category-card a {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  width: fit-content;
+  margin-top: 2px;
+  color: var(--accent-dark);
+  font-size: 11px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.allocation-category-card a:hover {
+  text-decoration: underline;
+}
+
+.allocation-table-wrap {
+  max-height: 680px;
+  overflow: auto;
+}
+
+.allocation-table {
+  width: 100%;
+  min-width: 1120px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+}
+
+.allocation-table th,
+.allocation-table td {
+  min-width: 132px;
+  border-right: 1px solid var(--soft-line);
+  border-bottom: 1px solid var(--soft-line);
+  padding: 8px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.allocation-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--page-accent) 8%, #ffffff);
+  font-size: 11px;
+}
+
+.allocation-table th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 124px;
+  background: #ffffff;
+}
+
+.allocation-table thead th:first-child {
+  z-index: 3;
+  background: color-mix(in srgb, var(--page-accent) 8%, #ffffff);
+}
+
+.allocation-table tbody tr:hover td,
+.allocation-table tbody tr:hover th {
+  background-color: color-mix(in srgb, var(--page-accent) 4%, #ffffff);
+}
+
+.allocation-value {
+  position: relative;
+  display: grid;
+  gap: 1px;
+  isolation: isolate;
+  overflow: hidden;
+  border-radius: 5px;
+  padding: 4px 5px;
+}
+
+.allocation-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: -1;
+  min-width: 2px;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--page-accent) 12%, transparent);
+}
+
+.allocation-value strong {
+  color: var(--ink);
+}
+
+.allocation-value small,
+.allocation-missing {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.allocation-warning {
+  margin: 10px 12px 0;
+  border: 1px solid color-mix(in srgb, var(--amber) 28%, var(--line));
+  border-radius: 7px;
+  padding: 8px 10px;
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 6%, #ffffff);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.allocation-notes {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 12px 28px 14px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.institution-allocation > .empty {
+  margin: 12px;
+}
+
 .watchlist-section,
 .watchlist-detail-embed,
 .stock-detail-panel,
@@ -2916,6 +3198,15 @@ footer {
     flex-direction: column;
   }
 
+  .institution-allocation-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .allocation-period {
+    width: fit-content;
+  }
+
   .watchlist-detail-head {
     align-items: stretch;
     flex-direction: column;
@@ -2991,6 +3282,19 @@ footer {
 
   .page-nav a {
     flex: 1 1 0;
+  }
+
+  .stock-subtabs span {
+    display: none;
+  }
+
+  .stock-subtabs button {
+    place-items: center;
+    text-align: center;
+  }
+
+  .allocation-category-grid {
+    grid-template-columns: 1fr;
   }
 
   .commodity-summary,

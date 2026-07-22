@@ -131,6 +131,11 @@ function stockIdFromPath(path) {
   return match ? decodeURIComponent(match[1]) : "";
 }
 
+function initialStockTab(stockId) {
+  if (stockId) return "watchlist";
+  return new URLSearchParams(window.location.search).get("tab") === "watchlist" ? "watchlist" : "market";
+}
+
 function NewsPage() {
   const [news, setNews] = useState({ china: [], world: [] });
   const [visibleCounts, setVisibleCounts] = useState({ china: INITIAL_VISIBLE, world: INITIAL_VISIBLE });
@@ -271,6 +276,7 @@ function NewsCard({ item, isNew }) {
 
 function StocksPage({ stockId = "" }) {
   const [markets, setMarkets] = useState([]);
+  const [institutionAllocation, setInstitutionAllocation] = useState({});
   const [watchlist, setWatchlist] = useState([]);
   const [newMarketKeys, setNewMarketKeys] = useState(new Set());
   const [snapshotAt, setSnapshotAt] = useState("");
@@ -284,6 +290,7 @@ function StocksPage({ stockId = "" }) {
   const [watchlistBusyId, setWatchlistBusyId] = useState("");
   const [editingStockId, setEditingStockId] = useState("");
   const [editingName, setEditingName] = useState("");
+  const [stockTab, setStockTab] = useState(() => initialStockTab(stockId));
 
   const knownMarketSignatures = useRef(new Map());
   const lastStatusText = useRef("");
@@ -308,6 +315,7 @@ function StocksPage({ stockId = "" }) {
       }
 
       setMarkets(nextMarkets);
+      setInstitutionAllocation(data.institutionIndustryAllocation || {});
       setWatchlist(nextWatchlist);
       setSelectedStockId((current) => {
         const desired = current || stockId;
@@ -327,12 +335,21 @@ function StocksPage({ stockId = "" }) {
     }
   }, [stockId]);
 
-  const updateStocksPath = useCallback((nextId = "") => {
-    const nextPath = nextId ? `/stocks/${encodeURIComponent(nextId)}` : "/stocks";
-    if (window.location.pathname !== nextPath) {
-      window.history.replaceState(null, "", nextPath);
+  const updateStocksPath = useCallback((nextId = "", nextTab = "market") => {
+    const nextLocation = nextId
+      ? `/stocks/${encodeURIComponent(nextId)}`
+      : nextTab === "watchlist"
+        ? "/stocks?tab=watchlist"
+        : "/stocks";
+    if (`${window.location.pathname}${window.location.search}` !== nextLocation) {
+      window.history.replaceState(null, "", nextLocation);
     }
   }, []);
+
+  const selectStockTab = useCallback((nextTab) => {
+    setStockTab(nextTab);
+    updateStocksPath(nextTab === "watchlist" ? selectedStockId : "", nextTab);
+  }, [selectedStockId, updateStocksPath]);
 
   const importStock = useCallback(async (event) => {
     event.preventDefault();
@@ -357,8 +374,9 @@ function StocksPage({ stockId = "" }) {
       const detailStatus = data.detailPrefetched ? "；后台已拉取详情数据" : data.detailPrefetchError ? "；详情数据拉取失败" : "";
       setImportStatus(`${data.imported ? "已导入" : "已存在"}：${stock.name || stock.symbol || query}${detailStatus}`);
       if (stock.id) {
+        setStockTab("watchlist");
         setSelectedStockId(stock.id);
-        updateStocksPath(stock.id);
+        updateStocksPath(stock.id, "watchlist");
       }
       const statusText = withWatchlistCount(lastStatusText.current || "自选股票已更新", nextWatchlist.length);
       lastStatusText.current = statusText;
@@ -373,16 +391,17 @@ function StocksPage({ stockId = "" }) {
   const selectStock = useCallback(
     (item) => {
       if (!item?.id) return;
+      setStockTab("watchlist");
       setSelectedStockId(item.id);
       setWatchlistActionStatus("");
-      updateStocksPath(item.id);
+      updateStocksPath(item.id, "watchlist");
     },
     [updateStocksPath]
   );
 
   const closeDetail = useCallback(() => {
     setSelectedStockId("");
-    updateStocksPath("");
+    updateStocksPath("", "watchlist");
   }, [updateStocksPath]);
 
   const startEditStock = useCallback((item) => {
@@ -445,7 +464,7 @@ function StocksPage({ stockId = "" }) {
         setWatchlistActionStatus(`已删除：${stockName}`);
         if (selectedStockId === item.id) {
           setSelectedStockId("");
-          updateStocksPath("");
+          updateStocksPath("", "watchlist");
         }
         if (editingStockId === item.id) {
           setEditingStockId("");
@@ -474,45 +493,168 @@ function StocksPage({ stockId = "" }) {
 
   return (
     <PageShell
-      eyebrow="A股 / 港股 / 美股"
+      eyebrow={stockTab === "market" ? "大盘 · A股 / 港股 / 美股" : "个股 · 自选股票"}
       title="股票市场流动性与估值"
       activePage="stocks"
       status={status}
       actions={<RefreshButton loading={refreshing} title="刷新股票数据" onClick={requestBackgroundRefresh} />}
     >
-      <section className="market-grid" aria-live="polite">
-        {!markets.length ? (
-          <p className="empty">暂未取到市场流动性数据。</p>
-        ) : (
-          markets.map((market, index) => {
-            const key = marketKey(market, index);
-            return <MarketCard key={key} market={market} snapshotAt={snapshotAt} isNew={newMarketKeys.has(key)} />;
-          })
-        )}
-      </section>
+      <div className="stock-subtabs" role="tablist" aria-label="股票功能">
+        <button
+          id="stock-tab-market"
+          className={stockTab === "market" ? "is-active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={stockTab === "market"}
+          aria-controls="stock-panel-market"
+          onClick={() => selectStockTab("market")}
+        >
+          <strong>大盘</strong>
+          <span>A股 · 港股 · 美股 · 融资与机构占比</span>
+        </button>
+        <button
+          id="stock-tab-watchlist"
+          className={stockTab === "watchlist" ? "is-active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={stockTab === "watchlist"}
+          aria-controls="stock-panel-watchlist"
+          onClick={() => selectStockTab("watchlist")}
+        >
+          <strong>个股 <em>{watchlist.length}</em></strong>
+          <span>自选股票 · 行情 · 公司详情</span>
+        </button>
+      </div>
 
-      <WatchlistTable
-        items={watchlist}
-        importQuery={importQuery}
-        importStatus={importStatus}
-        importBusy={importBusy}
-        selectedStockId={selectedStockId}
-        actionStatus={watchlistActionStatus}
-        busyId={watchlistBusyId}
-        editingStockId={editingStockId}
-        editingName={editingName}
-        onImport={importStock}
-        onImportQueryChange={setImportQuery}
-        onSelectStock={selectStock}
-        onStartEdit={startEditStock}
-        onCancelEdit={cancelEditStock}
-        onSaveEdit={saveStockName}
-        onDelete={deleteStock}
-        onEditingNameChange={setEditingName}
-      />
+      {stockTab === "market" ? (
+        <div id="stock-panel-market" className="stock-tab-panel" role="tabpanel" aria-labelledby="stock-tab-market">
+          <section className="market-grid" aria-live="polite">
+            {!markets.length ? (
+              <p className="empty">暂未取到市场流动性数据。</p>
+            ) : (
+              markets.map((market, index) => {
+                const key = marketKey(market, index);
+                return <MarketCard key={key} market={market} snapshotAt={snapshotAt} isNew={newMarketKeys.has(key)} />;
+              })
+            )}
+          </section>
+          <InstitutionIndustryAllocation allocation={institutionAllocation} />
+        </div>
+      ) : (
+        <div id="stock-panel-watchlist" className="stock-tab-panel" role="tabpanel" aria-labelledby="stock-tab-watchlist">
+          <WatchlistTable
+            items={watchlist}
+            importQuery={importQuery}
+            importStatus={importStatus}
+            importBusy={importBusy}
+            selectedStockId={selectedStockId}
+            actionStatus={watchlistActionStatus}
+            busyId={watchlistBusyId}
+            editingStockId={editingStockId}
+            editingName={editingName}
+            onImport={importStock}
+            onImportQueryChange={setImportQuery}
+            onSelectStock={selectStock}
+            onStartEdit={startEditStock}
+            onCancelEdit={cancelEditStock}
+            onSaveEdit={saveStockName}
+            onDelete={deleteStock}
+            onEditingNameChange={setEditingName}
+          />
 
-      {selectedStockId && <StockWatchDetailEmbed stockId={selectedStockId} status={status} onClose={closeDetail} />}
+          {selectedStockId && <StockWatchDetailEmbed stockId={selectedStockId} status={status} onClose={closeDetail} />}
+        </div>
+      )}
     </PageShell>
+  );
+}
+
+function InstitutionIndustryAllocation({ allocation = {} }) {
+  const categories = allocation.categories || [];
+  const industries = allocation.industries || [];
+  const errors = allocation.errors || [];
+
+  return (
+    <section className="institution-allocation" aria-labelledby="institution-allocation-title">
+      <div className="institution-allocation-heading">
+        <div>
+          <p className="eyebrow">机构持仓结构</p>
+          <h2 id="institution-allocation-title">各类资金的行业占比</h2>
+          <p>{allocation.basis || "各类资金已披露持仓市值内的行业占比"}</p>
+        </div>
+        {allocation.reportDate && <span className="allocation-period">主口径截至 {allocation.reportDate}</span>}
+      </div>
+
+      {!categories.length || !industries.length ? (
+        <p className="empty">机构行业占比暂未取到，市场总览仍可正常使用。</p>
+      ) : (
+        <>
+          <div className="allocation-category-grid">
+            {categories.map((category) => (
+              <article className="allocation-category-card" key={category.id}>
+                <header>
+                  <strong>{category.label}</strong>
+                  <span>{category.reportDate}</span>
+                </header>
+                <b>{formatMoney(category.totalMarketValue, "CNY")}</b>
+                <p>
+                  样本 {formatNumber(category.sampleCount, 0)}
+                  {category.totalCount && category.totalCount !== category.sampleCount ? ` / ${formatNumber(category.totalCount, 0)}` : ""}
+                </p>
+                {category.coveragePct !== null && category.coveragePct !== undefined && (
+                  <p>{category.coverageLabel} {formatPctPlain(category.coveragePct)}</p>
+                )}
+                <small>{category.note}</small>
+                <a href={category.sourceUrl} target="_blank" rel="noreferrer">
+                  {category.source} <ExternalLink size={12} aria-hidden="true" />
+                </a>
+              </article>
+            ))}
+          </div>
+
+          <div className="allocation-table-wrap">
+            <table className="allocation-table">
+              <thead>
+                <tr>
+                  <th scope="col">申万一级行业</th>
+                  {categories.map((category) => <th scope="col" key={category.id}>{category.label}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {industries.map((industry) => (
+                  <tr key={industry.name}>
+                    <th scope="row">{industry.name}</th>
+                    {categories.map((category) => {
+                      const value = industry.values?.[category.id];
+                      return (
+                        <td key={category.id}>
+                          {value ? (
+                            <div className="allocation-value" title={`${industry.name} · ${category.label}：${formatPctPlain(value.sharePct)}，${formatMoney(value.marketValue, "CNY")}`}>
+                              <span className="allocation-bar" style={{ width: `${Math.min(Number(value.sharePct) || 0, 100)}%` }} aria-hidden="true" />
+                              <strong>{formatPctPlain(value.sharePct)}</strong>
+                              <small>{formatMoney(value.marketValue, "CNY")}</small>
+                            </div>
+                          ) : (
+                            <span className="allocation-missing">—</span>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {!!errors.length && <p className="allocation-warning">部分来源本轮未取到：{errors.join("；")}</p>}
+      {!!allocation.notes?.length && (
+        <ul className="allocation-notes">
+          {allocation.notes.map((note) => <li key={note}>{note}</li>)}
+        </ul>
+      )}
+    </section>
   );
 }
 

@@ -10,8 +10,10 @@ import re
 import sqlite3
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta, timezone
 from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlencode
@@ -26,7 +28,7 @@ CONFIG_PATH = ROOT_DIR / "config" / "sources.json"
 DB_LOCK = asyncio.Lock()
 STOCK_CACHE_LOCK = asyncio.Lock()
 STOCK_CACHE: dict[str, Any] = {"expires_at": datetime.min.replace(tzinfo=UTC), "data": None}
-STOCK_SCHEMA_VERSION = 11
+STOCK_SCHEMA_VERSION = 12
 CN_TZ = timezone(timedelta(hours=8))
 try:
     US_EASTERN_TZ = ZoneInfo("America/New_York")
@@ -36,6 +38,10 @@ STOCK_MARKET_HISTORY_MAX_SNAPSHOTS_PER_MARKET = 1
 TURNOVER_HISTORY_CACHE_TTL_SECONDS = 24 * 60 * 60
 FINANCING_HISTORY_CACHE_TTL_SECONDS = 24 * 60 * 60
 A_SHARE_TURNOVER_MONTHLY_TRADING_DAYS = 21
+INSTITUTION_HOLDINGS_SAMPLE_SIZE = 500
+ETF_SAMPLE_SIZE = 12
+ETF_LIST_PAGE_SIZE = 100
+ETF_LIST_MAX_PAGES = 20
 
 EASTMONEY = "https://push2.eastmoney.com"
 EASTMONEY_HIS = "https://push2his.eastmoney.com"
@@ -43,6 +49,11 @@ EASTMONEY_BKZJ_URL = "https://data.eastmoney.com/bkzj/"
 EASTMONEY_STOCK_STATS_API = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 EASTMONEY_STOCK_STATS_URL = "https://data.eastmoney.com/cjsj/gpjytj.html"
 EASTMONEY_RZRQ_URL = "https://data.eastmoney.com/rzrq/"
+EASTMONEY_INSTITUTION_HOLDINGS_URL = "https://data.eastmoney.com/zlsj/jj.html"
+EASTMONEY_NATIONAL_TEAM_URL = "https://data.eastmoney.com/gjdcg/"
+EASTMONEY_ETF_LIST_API = "https://push2delay.eastmoney.com/api/qt/clist/get"
+EASTMONEY_FUND_HOLDINGS_API = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
+PRIVATE_FUND_Q1_SOURCE_URL = "https://finance.eastmoney.com/a/202605063728332280.html"
 THS_HYZJL_URL = "https://data.10jqka.com.cn/funds/hyzjl/"
 THS_MARGIN_URL = "https://data.10jqka.com.cn/market/rzrq/"
 TRADINGVIEW_SCAN = "https://scanner.tradingview.com"
@@ -87,6 +98,72 @@ HK_SFC_MARGIN_BALANCE = {
     "source": "SFC Financial Review 2025",
     "sourceUrl": HK_SFC_MARGIN_REVIEW_URL,
 }
+
+INSTITUTION_ORG_TYPES = [
+    {"id": "public_fund", "label": "公募基金", "orgType": "01", "note": "季报按重仓披露口径；取披露持仓市值前 500 只股票。"},
+    {"id": "social_security", "label": "社保基金", "orgType": "03", "note": "取披露持仓市值前 500 只股票。"},
+    {"id": "insurance", "label": "保险资金", "orgType": "05", "note": "取披露持仓市值前 500 只股票。"},
+    {"id": "qfii", "label": "QFII", "orgType": "02", "note": "取披露持仓市值前 500 只股票。"},
+]
+
+# 东方财富持仓接口返回申万二级行业。统一归并到申万一级，确保各类资金可横向比较。
+SW_INDUSTRY_GROUPS = {
+    "农林牧渔": ("种植业", "渔业", "林业", "饲料", "农产品加工", "养殖业", "动物保健"),
+    "基础化工": ("化学原料", "化学制品", "化学纤维", "农化制品", "塑料", "橡胶", "非金属材料"),
+    "钢铁": ("普钢", "特钢", "冶钢原料"),
+    "有色金属": ("贵金属", "工业金属", "能源金属", "小金属", "金属新材料"),
+    "电子": ("半导体", "元件", "光学光电子", "消费电子", "其他电子", "电子化学品"),
+    "家用电器": ("白色家电", "黑色家电", "小家电", "厨卫电器", "照明设备", "家电零部件"),
+    "食品饮料": ("白酒", "非白酒", "调味发酵品", "食品加工", "休闲食品", "饮料乳品"),
+    "纺织服饰": ("纺织制造", "服装家纺", "饰品"),
+    "轻工制造": ("造纸", "包装印刷", "家居用品", "文娱用品", "个护用品"),
+    "医药生物": ("化学制药", "生物制品", "中药", "医药商业", "医疗器械", "医疗服务"),
+    "公用事业": ("电力", "燃气"),
+    "交通运输": ("航空机场", "航运港口", "铁路公路", "物流"),
+    "房地产": ("房地产开发", "房地产服务"),
+    "商贸零售": ("一般零售", "专业连锁", "互联网电商", "贸易", "旅游零售"),
+    "社会服务": ("酒店餐饮", "旅游及景区", "教育", "专业服务"),
+    "综合": ("综合",),
+    "建筑材料": ("水泥", "玻璃玻纤", "装修建材"),
+    "建筑装饰": ("房屋建设", "基础建设", "专业工程", "工程咨询服务", "装修装饰"),
+    "电力设备": ("电池", "光伏设备", "风电设备", "电网设备", "电机", "其他电源设备"),
+    "国防军工": ("地面兵装", "航海装备", "航空装备", "航天装备", "军工电子"),
+    "计算机": ("计算机设备", "软件开发", "IT服务"),
+    "传媒": ("出版", "电视广播", "广告营销", "数字媒体", "影视院线", "游戏"),
+    "通信": ("通信服务", "通信设备"),
+    "银行": ("银行",),
+    "非银金融": ("保险", "多元金融", "证券"),
+    "汽车": ("乘用车", "商用车", "汽车零部件", "摩托车及其他"),
+    "机械设备": ("工程机械", "轨交设备", "环保设备", "通用设备", "专用设备", "自动化设备"),
+    "煤炭": ("煤炭开采", "焦炭"),
+    "石油石化": ("炼化及贸易", "油服工程", "油气开采"),
+    "环保": ("环境治理",),
+    "美容护理": ("化妆品", "医疗美容"),
+}
+SW_INDUSTRY_LOOKUP = {
+    child: parent
+    for parent, children in SW_INDUSTRY_GROUPS.items()
+    for child in children
+}
+
+PRIVATE_FUND_Q1_INDUSTRIES_YUAN = {
+    "食品饮料": 13_794_093_800,
+    "石油石化": 10_695_086_700,
+    "计算机": 9_693_395_500,
+    "电子": 7_435_218_500,
+    "煤炭": 7_289_469_000,
+    "通信": 5_467_322_900,
+    "机械设备": 2_678_420_600,
+    "交通运输": 2_343_438_500,
+    "银行": 2_212_084_100,
+    "基础化工": 2_183_228_100,
+}
+PRIVATE_FUND_Q1_TOTAL_YUAN = 78_194_000_000
+
+ETF_EXCLUDED_NAME_PARTS = (
+    "货币", "日利", "添益", "黄金", "白银", "债", "纳指", "标普", "恒生", "港股", "中概",
+    "香港", "海外", "日经", "德国", "法国", "沙特", "印度", "越南", "商品", "原油", "豆粕",
+)
 
 GDP_REFERENCES = {
     "a_share": {
@@ -291,6 +368,15 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
         errors.append(f"市场流动性数据：{error}")
         markets = empty_markets()
 
+    try:
+        institution_allocation = await asyncio.to_thread(
+            fetch_institution_industry_allocation_sync,
+            request_state.timeout,
+        )
+    except Exception as error:
+        errors.append(f"机构行业占比：{error}")
+        institution_allocation = empty_institution_industry_allocation(str(error))
+
     warnings = china.pop("_warnings", []) if isinstance(china, dict) else []
     errors.extend(warnings)
 
@@ -304,10 +390,11 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
         "fromStorage": False,
         "throttled": False,
         "hasData": False,
-        "source": "TradingView Scanner / HKEX每日市场概况 / 东方财富融资融券 / FINRA Margin Statistics / SFC Financial Review / 东方财富板块资金流向 / 同花顺行业资金流向",
+        "source": "TradingView Scanner / HKEX每日市场概况 / 东方财富融资融券 / FINRA Margin Statistics / SFC Financial Review / 东方财富板块资金流向 / 同花顺行业资金流向 / 东方财富机构持仓 / 天天基金 ETF 持仓",
         "cadence": "半小时最多真实抓取一次",
         "errors": errors,
         "markets": markets,
+        "institutionIndustryAllocation": institution_allocation,
         "china": china,
         "world": world,
     }
@@ -1167,6 +1254,521 @@ def public_market_candidates(candidates: list[dict[str, Any]]) -> list[dict[str,
         {key: value for key, value in candidate.items() if key != "raw"}
         for candidate in candidates
     ]
+
+
+def latest_completed_disclosure_period(reference_date: date | None = None) -> date:
+    reference_date = reference_date or datetime.now(CN_TZ).date()
+    candidates: list[tuple[date, date]] = []
+    for year in range(reference_date.year - 2, reference_date.year + 1):
+        candidates.extend(
+            [
+                (date(year, 3, 31), date(year, 4, 30)),
+                (date(year, 6, 30), date(year, 8, 31)),
+                (date(year, 9, 30), date(year, 10, 31)),
+                (date(year, 12, 31), date(year + 1, 4, 30)),
+            ]
+        )
+    available = [period for period, disclosure_deadline in candidates if disclosure_deadline <= reference_date]
+    return max(available)
+
+
+def normalize_sw_industry(value: Any) -> str:
+    industry = str(value or "").strip()
+    if not industry:
+        return "未分类"
+    industry = re.sub(r"(?:Ⅰ|Ⅱ|Ⅲ|III|II|IV|I)+$", "", industry).strip()
+    return SW_INDUSTRY_LOOKUP.get(industry, industry)
+
+
+def empty_institution_industry_allocation(error: str = "") -> dict[str, Any]:
+    report_date = latest_completed_disclosure_period().isoformat()
+    return {
+        "reportDate": report_date,
+        "generatedAt": datetime.now(UTC).isoformat(),
+        "basis": "各类资金已披露持仓市值内的申万一级行业占比",
+        "categories": [],
+        "industries": [],
+        "notes": [
+            "占比的分母是该类资金当前展示样本的已披露持仓市值，不是行业总市值或流通市值。",
+            "不同资金类别可能重叠，例如 ETF 也属于公募基金，不能横向相加。",
+        ],
+        "errors": [error] if error else [],
+    }
+
+
+def fetch_institution_industry_allocation_sync(timeout: float) -> dict[str, Any]:
+    report_date = latest_completed_disclosure_period().isoformat()
+    categories: list[dict[str, Any]] = []
+    errors: list[str] = []
+    session = requests.Session()
+    try:
+        for category_def in INSTITUTION_ORG_TYPES:
+            try:
+                categories.append(fetch_org_holding_category_sync(session, category_def, report_date, timeout))
+            except Exception as error:
+                errors.append(f"{category_def['label']}：{error}")
+
+        categories.append(private_fund_category())
+
+        try:
+            categories.append(fetch_national_team_category_sync(session, report_date, timeout))
+        except Exception as error:
+            errors.append(f"国家队：{error}")
+
+        try:
+            categories.append(fetch_etf_category_sync(session, report_date, timeout))
+        except Exception as error:
+            errors.append(f"股票 ETF 样本：{error}")
+    finally:
+        session.close()
+
+    return build_institution_industry_payload(report_date, categories, errors)
+
+
+def fetch_org_holding_category_sync(
+    session: requests.Session,
+    category_def: dict[str, str],
+    report_date: str,
+    timeout: float,
+) -> dict[str, Any]:
+    params = {
+        "reportName": "RPT_MAIN_ORGHOLD",
+        "columns": "ALL",
+        "sortColumns": "HOLD_VALUE",
+        "sortTypes": "-1",
+        "pageNumber": "1",
+        "pageSize": str(INSTITUTION_HOLDINGS_SAMPLE_SIZE),
+        "source": "WEB",
+        "client": "WEB",
+        "filter": f"(REPORT_DATE='{report_date}')(ORG_TYPE=\"{category_def['orgType']}\")",
+        "quoteColumns": "f100~01~SECURITY_CODE~INDUSTRY",
+    }
+    result = fetch_eastmoney_datacenter_result(
+        session,
+        params,
+        EASTMONEY_INSTITUTION_HOLDINGS_URL,
+        timeout,
+    )
+    rows = result.get("data") or []
+    values = aggregate_industry_values(rows, "HOLD_VALUE")
+    if not values:
+        raise RuntimeError("接口未返回可聚合的行业持仓")
+    total_count = int(result.get("count") or len(rows))
+    return institution_category(
+        category_id=category_def["id"],
+        label=category_def["label"],
+        report_date=report_date,
+        values=values,
+        sample_count=len(rows),
+        total_count=total_count,
+        source="东方财富机构持仓",
+        source_url=EASTMONEY_INSTITUTION_HOLDINGS_URL,
+        note=category_def["note"],
+        coverage_label="披露股票数量覆盖",
+        coverage_pct=len(rows) / total_count * 100 if total_count else None,
+    )
+
+
+def fetch_national_team_category_sync(
+    session: requests.Session,
+    report_date: str,
+    timeout: float,
+) -> dict[str, Any]:
+    params = {
+        "reportName": "RPT_NATIONAL_STATISTICS",
+        "columns": "ALL",
+        "sortColumns": "MARKET_CAP_SUM",
+        "sortTypes": "-1",
+        "pageNumber": "1",
+        "pageSize": str(INSTITUTION_HOLDINGS_SAMPLE_SIZE),
+        "source": "WEB",
+        "client": "WEB",
+        "filter": f"(REPORT_DATE='{report_date}')",
+        "quoteColumns": "f100~01~SECURITY_CODE~INDUSTRY",
+    }
+    result = fetch_eastmoney_datacenter_result(session, params, EASTMONEY_NATIONAL_TEAM_URL, timeout)
+    rows = result.get("data") or []
+    values = aggregate_industry_values(rows, "MARKET_CAP_SUM")
+    if not values:
+        raise RuntimeError("接口未返回可聚合的行业持仓")
+    total_count = int(result.get("count") or len(rows))
+    return institution_category(
+        category_id="national_team",
+        label="国家队",
+        report_date=report_date,
+        values=values,
+        sample_count=len(rows),
+        total_count=total_count,
+        source="东方财富国家队持股",
+        source_url=EASTMONEY_NATIONAL_TEAM_URL,
+        note="国家队机构披露持仓按股票汇总；取持仓市值前 500 只股票。",
+        coverage_label="披露股票数量覆盖",
+        coverage_pct=len(rows) / total_count * 100 if total_count else None,
+    )
+
+
+def private_fund_category() -> dict[str, Any]:
+    values = dict(PRIVATE_FUND_Q1_INDUSTRIES_YUAN)
+    disclosed_top_total = sum(values.values())
+    values["其他20个行业"] = max(PRIVATE_FUND_Q1_TOTAL_YUAN - disclosed_top_total, 0)
+    return institution_category(
+        category_id="private_fund",
+        label="百亿私募",
+        report_date="2026-03-31",
+        values=values,
+        sample_count=203,
+        total_count=203,
+        source="私募排排网公开统计（东方财富转载）",
+        source_url=PRIVATE_FUND_Q1_SOURCE_URL,
+        note="47 家百亿私募进入 203 家公司前十大流通股东的公开样本；原文仅公开行业前十，其余 20 个行业合并展示。",
+        coverage_label="公开样本股票",
+        coverage_pct=None,
+    )
+
+
+def fetch_etf_category_sync(
+    session: requests.Session,
+    report_date: str,
+    timeout: float,
+) -> dict[str, Any]:
+    rows = fetch_etf_universe_rows_sync(session, timeout)
+    eligible = [row for row in rows if is_domestic_equity_etf(row)]
+    eligible.sort(key=lambda row: value_or_zero(row.get("f20")), reverse=True)
+    selected = eligible[:ETF_SAMPLE_SIZE]
+    if not selected:
+        raise RuntimeError("ETF 列表未返回境内股票 ETF")
+
+    holdings_by_code: dict[str, float] = {}
+    successful: list[dict[str, Any]] = []
+    failed_names: list[str] = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(fetch_one_etf_holdings_sync, row, report_date, timeout): row
+            for row in selected
+        }
+        for future in as_completed(futures):
+            row = futures[future]
+            try:
+                holdings = future.result()
+            except Exception:
+                failed_names.append(str(row.get("f14") or row.get("f12") or "未知 ETF"))
+                continue
+            if not holdings:
+                failed_names.append(str(row.get("f14") or row.get("f12") or "未知 ETF"))
+                continue
+            successful.append(row)
+            for holding in holdings:
+                code = holding["code"]
+                holdings_by_code[code] = holdings_by_code.get(code, 0.0) + holding["marketValue"]
+
+    if not holdings_by_code:
+        raise RuntimeError("选取的 ETF 未返回目标报告期持仓")
+    successful.sort(key=lambda row: value_or_zero(row.get("f20")), reverse=True)
+    failed_names.sort()
+    industry_map = fetch_stock_industry_map_sync(session, set(holdings_by_code), timeout)
+    values: dict[str, float] = {}
+    for code, market_value in holdings_by_code.items():
+        industry = normalize_sw_industry(industry_map.get(code))
+        values[industry] = values.get(industry, 0.0) + market_value
+
+    eligible_cap = sum(value_or_zero(row.get("f20")) for row in eligible)
+    selected_cap = sum(value_or_zero(row.get("f20")) for row in successful)
+    selected_names = "、".join(str(row.get("f14") or row.get("f12")) for row in successful)
+    failure_note = f"；{len(failed_names)} 只未取得目标季报" if failed_names else ""
+    return institution_category(
+        category_id="etf",
+        label="股票 ETF",
+        report_date=report_date,
+        values=values,
+        sample_count=len(successful),
+        total_count=len(eligible),
+        source="东方财富 ETF 行情 / 天天基金持仓明细",
+        source_url="https://fund.eastmoney.com/data/fundranking.html#tETF",
+        note=f"按当前规模选取头部 {ETF_SAMPLE_SIZE} 只境内股票 ETF，并聚合目标报告期全部披露股票持仓；样本：{selected_names}{failure_note}。",
+        coverage_label="样本 ETF 当前规模覆盖",
+        coverage_pct=selected_cap / eligible_cap * 100 if eligible_cap else None,
+    )
+
+
+def fetch_etf_universe_rows_sync(session: requests.Session, timeout: float) -> list[dict[str, Any]]:
+    base_params = {
+        "po": "1",
+        "np": "1",
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f20",
+        "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024,b:MK0827",
+        "fields": "f12,f14,f20,f38",
+    }
+    rows: list[dict[str, Any]] = []
+    total = 0
+    page = 1
+    while page <= ETF_LIST_MAX_PAGES and (page == 1 or len(rows) < total):
+        response = session.get(
+            EASTMONEY_ETF_LIST_API,
+            params={**base_params, "pn": str(page), "pz": str(ETF_LIST_PAGE_SIZE)},
+            headers=eastmoney_headers("https://quote.eastmoney.com/center/gridlist.html#fund_etf"),
+            timeout=max(timeout, 15),
+        )
+        response.raise_for_status()
+        data = response.json().get("data") or {}
+        page_rows = data.get("diff") or []
+        if isinstance(page_rows, dict):
+            page_rows = list(page_rows.values())
+        if not page_rows:
+            break
+        rows.extend(page_rows)
+        total = int(data.get("total") or len(rows))
+        page += 1
+        time.sleep(0.05)
+    return rows
+
+
+def fetch_one_etf_holdings_sync(
+    etf: dict[str, Any],
+    report_date: str,
+    timeout: float,
+) -> list[dict[str, Any]]:
+    code = str(etf.get("f12") or "")
+    if not code:
+        return []
+    with requests.Session() as session:
+        response = session.get(
+            EASTMONEY_FUND_HOLDINGS_API,
+            params={
+                "type": "jjcc",
+                "code": code,
+                "topline": "10000",
+                "year": report_date[:4],
+                "month": str(int(report_date[5:7])),
+                "rt": f"{random.random():.12f}",
+            },
+            headers={
+                **eastmoney_headers(f"https://fundf10.eastmoney.com/ccmx_{code}.html"),
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            timeout=max(timeout, 15),
+        )
+        response.raise_for_status()
+        response.encoding = "utf-8"
+        return parse_etf_holdings_page(response.text, report_date)
+
+
+def parse_etf_holdings_page(text: str, report_date: str) -> list[dict[str, Any]]:
+    date_match = re.search(
+        rf"截止至：\s*<font[^>]*>\s*{re.escape(report_date)}\s*</font>",
+        text,
+        re.I,
+    )
+    if not date_match:
+        return []
+    box_pattern = re.compile(r"<div\s+class=['\"]box['\"]", re.I)
+    starts = [match.start() for match in box_pattern.finditer(text, 0, date_match.start())]
+    section_start = starts[-1] if starts else 0
+    next_box = box_pattern.search(text, date_match.end())
+    section_end = next_box.start() if next_box else len(text)
+    parser = HoldingsTableParser()
+    parser.feed(text[section_start:section_end])
+
+    holdings: list[dict[str, Any]] = []
+    for cells in parser.rows:
+        if len(cells) < 3:
+            continue
+        code = cells[1].strip()
+        market_value_wan = safe_float(cells[-1])
+        if not re.fullmatch(r"\d{6}", code) or market_value_wan is None or market_value_wan <= 0:
+            continue
+        holdings.append({"code": code, "marketValue": market_value_wan * 10_000})
+    return holdings
+
+
+class HoldingsTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == "tr":
+            self._row = []
+        elif tag.lower() in {"td", "th"} and self._row is not None:
+            self._cell = []
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"td", "th"} and self._row is not None and self._cell is not None:
+            self._row.append("".join(self._cell).strip())
+            self._cell = None
+        elif tag.lower() == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+            self._cell = None
+
+
+def fetch_stock_industry_map_sync(
+    session: requests.Session,
+    codes: set[str],
+    timeout: float,
+) -> dict[str, str]:
+    industry_map: dict[str, str] = {}
+    ordered_codes = sorted(code for code in codes if re.fullmatch(r"\d{6}", code))
+    for offset in range(0, len(ordered_codes), 60):
+        chunk = ordered_codes[offset : offset + 60]
+        secids = ",".join(f"{'1' if code.startswith(('5', '6', '9')) else '0'}.{code}" for code in chunk)
+        response = session.get(
+            f"{EASTMONEY}/api/qt/ulist.np/get",
+            params={
+                "fltt": "2",
+                "secids": secids,
+                "fields": "f12,f14,f100",
+                "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+            },
+            headers=eastmoney_headers("https://quote.eastmoney.com/"),
+            timeout=max(timeout, 15),
+        )
+        response.raise_for_status()
+        rows = (response.json().get("data") or {}).get("diff") or []
+        if isinstance(rows, dict):
+            rows = list(rows.values())
+        for row in rows:
+            code = str(row.get("f12") or "")
+            industry = str(row.get("f100") or "").strip()
+            if code and industry:
+                industry_map[code] = industry
+    return industry_map
+
+
+def is_domestic_equity_etf(row: dict[str, Any]) -> bool:
+    name = str(row.get("f14") or "")
+    market_cap = value_or_zero(row.get("f20"))
+    return bool(name and market_cap > 0 and not any(part in name for part in ETF_EXCLUDED_NAME_PARTS))
+
+
+def fetch_eastmoney_datacenter_result(
+    session: requests.Session,
+    params: dict[str, str],
+    referer: str,
+    timeout: float,
+) -> dict[str, Any]:
+    response = session.get(
+        EASTMONEY_STOCK_STATS_API,
+        params=params,
+        headers=eastmoney_headers(referer),
+        timeout=max(timeout, 15),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("success") or not payload.get("result"):
+        raise RuntimeError(str(payload.get("message") or "东方财富数据中心未返回结果"))
+    return payload["result"]
+
+
+def aggregate_industry_values(rows: list[dict[str, Any]], value_field: str) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for row in rows:
+        market_value = safe_float(row.get(value_field))
+        if market_value is None or market_value <= 0:
+            continue
+        industry = normalize_sw_industry(row.get("INDUSTRY"))
+        values[industry] = values.get(industry, 0.0) + market_value
+    return values
+
+
+def institution_category(
+    *,
+    category_id: str,
+    label: str,
+    report_date: str,
+    values: dict[str, float],
+    sample_count: int,
+    total_count: int,
+    source: str,
+    source_url: str,
+    note: str,
+    coverage_label: str,
+    coverage_pct: float | None,
+) -> dict[str, Any]:
+    clean_values = {
+        industry: value
+        for industry, value in values.items()
+        if value > 0
+    }
+    return {
+        "id": category_id,
+        "label": label,
+        "reportDate": report_date,
+        "sampleCount": sample_count,
+        "totalCount": total_count,
+        "totalMarketValue": round(sum(clean_values.values()), 2),
+        "source": source,
+        "sourceUrl": source_url,
+        "note": note,
+        "coverageLabel": coverage_label,
+        "coveragePct": round(coverage_pct, 2) if coverage_pct is not None else None,
+        "_industryValues": clean_values,
+    }
+
+
+def build_institution_industry_payload(
+    report_date: str,
+    categories: list[dict[str, Any]],
+    errors: list[str],
+) -> dict[str, Any]:
+    category_order = {
+        "public_fund": 0,
+        "private_fund": 1,
+        "national_team": 2,
+        "etf": 3,
+        "social_security": 4,
+        "insurance": 5,
+        "qfii": 6,
+    }
+    categories.sort(key=lambda item: category_order.get(str(item.get("id")), 99))
+    industry_scores: dict[str, float] = {}
+    for category in categories:
+        total = value_or_zero(category.get("totalMarketValue"))
+        if total <= 0:
+            continue
+        for industry, market_value in category.get("_industryValues", {}).items():
+            industry_scores[industry] = industry_scores.get(industry, 0.0) + market_value / total * 100
+
+    industries = []
+    for industry in sorted(industry_scores, key=lambda name: (-industry_scores[name], name)):
+        values: dict[str, dict[str, float]] = {}
+        for category in categories:
+            category_id = str(category.get("id"))
+            market_value = value_or_zero(category.get("_industryValues", {}).get(industry))
+            total = value_or_zero(category.get("totalMarketValue"))
+            if market_value <= 0 or total <= 0:
+                continue
+            values[category_id] = {
+                "marketValue": round(market_value, 2),
+                "sharePct": round(market_value / total * 100, 2),
+            }
+        industries.append({"name": industry, "values": values})
+
+    public_categories = [
+        {key: value for key, value in category.items() if key != "_industryValues"}
+        for category in categories
+    ]
+    return {
+        "reportDate": report_date,
+        "generatedAt": datetime.now(UTC).isoformat(),
+        "basis": "各类资金已披露持仓市值内的申万一级行业占比",
+        "categories": public_categories,
+        "industries": industries,
+        "notes": [
+            "每列占比以该类资金当前展示样本的已披露持仓市值为 100%，不是该行业总市值或流通市值占比。",
+            "公募季报按重仓披露口径；国家队、社保、保险、QFII 按上市公司机构持仓披露口径。",
+            "不同资金类别可能重叠，例如 ETF 也属于公募基金，不能横向相加。",
+        ],
+        "errors": errors,
+    }
 
 
 def fetch_market_overviews_sync(db_path: Path, timeout: float) -> list[dict[str, Any]]:
