@@ -1,15 +1,6 @@
 {
   "stocks": [
     {
-      "id": "us-momo",
-      "market": "us",
-      "symbol": "MOMO",
-      "name": "挚文集团",
-      "secid": "105.MOMO",
-      "gubaCode": "MOMO",
-      "xueqiuSymbol": "MOMO"
-    },
-    {
       "id": "hk-02400",
       "market": "hk",
       "symbol": "02400",

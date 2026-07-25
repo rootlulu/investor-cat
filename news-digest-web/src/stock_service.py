@@ -26,7 +26,7 @@ CONFIG_PATH = ROOT_DIR / "config" / "sources.json"
 DB_LOCK = asyncio.Lock()
 STOCK_CACHE_LOCK = asyncio.Lock()
 STOCK_CACHE: dict[str, Any] = {"expires_at": datetime.min.replace(tzinfo=UTC), "data": None}
-STOCK_SCHEMA_VERSION = 11
+STOCK_SCHEMA_VERSION = 13
 CN_TZ = timezone(timedelta(hours=8))
 try:
     US_EASTERN_TZ = ZoneInfo("America/New_York")
@@ -43,6 +43,7 @@ EASTMONEY_BKZJ_URL = "https://data.eastmoney.com/bkzj/"
 EASTMONEY_STOCK_STATS_API = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 EASTMONEY_STOCK_STATS_URL = "https://data.eastmoney.com/cjsj/gpjytj.html"
 EASTMONEY_RZRQ_URL = "https://data.eastmoney.com/rzrq/"
+EASTMONEY_RZRQ_INDUSTRY_URL = "https://data.eastmoney.com/rzrq/hy.html"
 THS_HYZJL_URL = "https://data.10jqka.com.cn/funds/hyzjl/"
 THS_MARGIN_URL = "https://data.10jqka.com.cn/market/rzrq/"
 TRADINGVIEW_SCAN = "https://scanner.tradingview.com"
@@ -87,6 +88,44 @@ HK_SFC_MARGIN_BALANCE = {
     "source": "SFC Financial Review 2025",
     "sourceUrl": HK_SFC_MARGIN_REVIEW_URL,
 }
+
+INDUSTRY_FINANCING_WINDOW_YEARS = 3
+INDUSTRY_FINANCING_TITLE = "近三年，各行业的融资盘累计净买入"
+INDUSTRY_FINANCING_PAGE_SIZE = 500
+INDUSTRY_FINANCING_MAX_PAGES = 120
+INDUSTRY_FINANCING_NOTE = "每日融资净买入按行业逐日累计，单位为亿元；行业名称按看板口径统一展示。"
+INDUSTRY_FINANCING_SERIES = (
+    {"id": "electronics", "code": "1201", "name": "电子"},
+    {"id": "communication", "code": "1215", "name": "通信"},
+    {"id": "machinery", "code": "1205", "name": "机械"},
+    {"id": "power_equipment", "code": "1200", "name": "电力设备及新能源"},
+    {"id": "nonferrous_metals", "code": "478", "name": "有色金属"},
+    {"id": "basic_chemicals", "code": "1206", "name": "基础化工"},
+    {"id": "computers", "code": "1207", "name": "计算机"},
+    {"id": "medicine", "code": "1216", "name": "医药"},
+    {"id": "non_bank_finance", "code": "1203", "name": "非银行金融"},
+    {"id": "defense", "code": "1204", "name": "国防军工"},
+    {"id": "automobiles", "code": "1211", "name": "汽车"},
+    {"id": "banks", "code": "1283", "name": "银行"},
+    {"id": "utilities", "code": "427", "name": "电力及公用事业"},
+    {"id": "home_appliances", "code": "456", "name": "家电"},
+    {"id": "building_materials", "code": "1208", "name": "建材"},
+    {"id": "transportation", "code": "1210", "name": "交通运输"},
+    {"id": "media", "code": "486", "name": "传媒"},
+    {"id": "construction", "code": "1209", "name": "建筑"},
+    {"id": "steel", "code": "479", "name": "钢铁"},
+    {"id": "light_manufacturing", "code": "1212", "name": "轻工制造"},
+    {"id": "textiles", "code": "436", "name": "纺织服装"},
+    {"id": "conglomerates", "code": "1217", "name": "综合"},
+    {"id": "consumer_services", "code": "1214", "name": "消费者服务"},
+    {"id": "diversified_finance", "code": "738", "name": "综合金融"},
+    {"id": "agriculture", "code": "433", "name": "农林牧渔"},
+    {"id": "real_estate", "code": "1202", "name": "房地产"},
+    {"id": "retail", "code": "1213", "name": "商贸零售"},
+    {"id": "petrochemicals", "code": "464", "name": "石油石化"},
+    {"id": "food_beverage", "code": "438", "name": "食品饮料"},
+    {"id": "coal", "code": "437", "name": "煤炭"},
+)
 
 GDP_REFERENCES = {
     "a_share": {
@@ -291,6 +330,20 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
         errors.append(f"市场流动性数据：{error}")
         markets = empty_markets()
 
+    previous_industry_financing = (stored or {}).get("industryFinancingTrend")
+    try:
+        industry_financing_trend = await asyncio.to_thread(
+            fetch_industry_financing_trend_sync,
+            request_state.timeout,
+            previous_industry_financing,
+        )
+    except Exception as error:
+        errors.append(f"行业融资累计净买入：{error}")
+        if industry_financing_previous_is_extendable(previous_industry_financing):
+            industry_financing_trend = stale_industry_financing_trend(previous_industry_financing, str(error))
+        else:
+            industry_financing_trend = empty_industry_financing_trend(f"行业融资历史暂未取到：{error}")
+
     warnings = china.pop("_warnings", []) if isinstance(china, dict) else []
     errors.extend(warnings)
 
@@ -304,10 +357,11 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
         "fromStorage": False,
         "throttled": False,
         "hasData": False,
-        "source": "TradingView Scanner / HKEX每日市场概况 / 东方财富融资融券 / FINRA Margin Statistics / SFC Financial Review / 东方财富板块资金流向 / 同花顺行业资金流向",
+        "source": "TradingView Scanner / HKEX每日市场概况 / 东方财富融资融券与行业两融明细 / FINRA Margin Statistics / SFC Financial Review / 东方财富板块资金流向 / 同花顺行业资金流向",
         "cadence": "半小时最多真实抓取一次",
         "errors": errors,
         "markets": markets,
+        "industryFinancingTrend": industry_financing_trend,
         "china": china,
         "world": world,
     }
@@ -542,6 +596,259 @@ def parse_margin_data_day(html: str) -> list[Any] | None:
 
     walk(payload)
     return records[-1] if records else None
+
+
+def industry_financing_window_start(as_of: date | None = None) -> date:
+    anchor = as_of or datetime.now(CN_TZ).date()
+    target_year = anchor.year - INDUSTRY_FINANCING_WINDOW_YEARS
+    try:
+        return anchor.replace(year=target_year)
+    except ValueError:
+        return anchor.replace(year=target_year, day=28)
+
+
+def empty_industry_financing_trend(
+    note: str = "行业融资历史暂未取到。",
+    requested_start_date: date | None = None,
+) -> dict[str, Any]:
+    window_start = requested_start_date or industry_financing_window_start()
+    return {
+        "status": "unavailable",
+        "title": INDUSTRY_FINANCING_TITLE,
+        "requestedStartDate": window_start.isoformat(),
+        "startDate": "",
+        "endDate": "",
+        "unit": "亿元",
+        "source": "东方财富Choice行业融资融券",
+        "sourceUrl": EASTMONEY_RZRQ_INDUSTRY_URL,
+        "note": note,
+        "dates": [],
+        "series": [],
+    }
+
+
+def industry_financing_trend_has_data(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    dates = value.get("dates")
+    series = value.get("series")
+    if not isinstance(dates, list) or not dates or not isinstance(series, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and isinstance(item.get("values"), list)
+        and any(point is not None for point in item["values"])
+        for item in series
+    )
+
+
+def stale_industry_financing_trend(previous: dict[str, Any], error: str) -> dict[str, Any]:
+    return {
+        **previous,
+        "status": "stale",
+        "note": f"{INDUSTRY_FINANCING_NOTE} 本轮刷新失败，继续展示上次快照：{error}",
+    }
+
+
+def industry_financing_previous_is_extendable(
+    previous: Any,
+    requested_start_date: date | None = None,
+) -> bool:
+    if not industry_financing_trend_has_data(previous):
+        return False
+
+    window_start = requested_start_date or industry_financing_window_start()
+    try:
+        previous_start = date.fromisoformat(str(previous.get("requestedStartDate") or ""))
+    except ValueError:
+        return False
+    if previous_start > window_start:
+        return False
+
+    dates = previous.get("dates") or []
+    try:
+        parsed_dates = [date.fromisoformat(str(item)) for item in dates]
+    except (TypeError, ValueError):
+        return False
+    if parsed_dates != sorted(set(parsed_dates)):
+        return False
+    if parsed_dates[-1] < window_start:
+        return False
+
+    expected_codes = {item["code"] for item in INDUSTRY_FINANCING_SERIES}
+    previous_series = previous.get("series") or []
+    series_by_code = {
+        str(item.get("code")): item
+        for item in previous_series
+        if isinstance(item, dict) and item.get("code") is not None
+    }
+    if set(series_by_code) != expected_codes:
+        return False
+    return all(
+        isinstance(series_by_code[code].get("values"), list)
+        and len(series_by_code[code]["values"]) == len(dates)
+        for code in expected_codes
+    )
+
+
+def industry_financing_query_start(
+    previous: Any,
+    requested_start_date: date | None = None,
+) -> date:
+    window_start = requested_start_date or industry_financing_window_start()
+    if not industry_financing_previous_is_extendable(previous, window_start):
+        return window_start
+    return date.fromisoformat(previous["dates"][-1])
+
+
+def fetch_industry_financing_trend_sync(
+    timeout: float,
+    previous: dict[str, Any] | None = None,
+    session: requests.Session | None = None,
+    requested_start_date: date | None = None,
+) -> dict[str, Any]:
+    window_start = requested_start_date or industry_financing_window_start()
+    previous_for_merge = previous if industry_financing_previous_is_extendable(previous, window_start) else None
+    query_start = industry_financing_query_start(previous_for_merge, window_start)
+    codes = ",".join(f'"{item["code"]}"' for item in INDUSTRY_FINANCING_SERIES)
+    filter_expression = f"(BOARD_CODE in ({codes}))(TRADE_DATE>='{query_start.isoformat()}')"
+    own_session = session is None
+    session = session or requests.Session()
+    rows: list[dict[str, Any]] = []
+    page_number = 1
+    pages = 1
+
+    try:
+        while page_number <= pages:
+            params = {
+                "reportName": "RPTA_WEB_BKJYMX",
+                "columns": "BOARD_CODE,BOARD_NAME,TRADE_DATE,FIN_NETBUY_AMT",
+                "source": "WEB",
+                "pageNumber": str(page_number),
+                "pageSize": str(INDUSTRY_FINANCING_PAGE_SIZE),
+                "sortColumns": "TRADE_DATE,BOARD_CODE",
+                "sortTypes": "1,1",
+                "filter": filter_expression,
+            }
+            response = session.get(
+                EASTMONEY_STOCK_STATS_API,
+                params=params,
+                headers=eastmoney_headers(EASTMONEY_RZRQ_INDUSTRY_URL),
+                timeout=max(timeout, 20),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("success"):
+                raise RuntimeError(payload.get("message") or "东方财富行业融资接口返回失败")
+            result = payload.get("result") or {}
+            rows.extend(result.get("data") or [])
+            if page_number == 1:
+                try:
+                    pages = max(1, int(result.get("pages") or 1))
+                except (TypeError, ValueError) as error:
+                    raise RuntimeError("东方财富行业融资接口分页信息无效") from error
+                if pages > INDUSTRY_FINANCING_MAX_PAGES:
+                    raise RuntimeError(f"东方财富行业融资历史分页异常：{pages} 页")
+            page_number += 1
+    finally:
+        if own_session:
+            session.close()
+
+    if not rows:
+        raise RuntimeError("东方财富行业融资接口未返回可用历史")
+    return build_industry_financing_trend(rows, previous_for_merge, window_start)
+
+
+def build_industry_financing_trend(
+    rows: list[dict[str, Any]],
+    previous: dict[str, Any] | None = None,
+    requested_start_date: date | None = None,
+) -> dict[str, Any]:
+    window_start = requested_start_date or industry_financing_window_start()
+    previous_for_merge = previous if industry_financing_previous_is_extendable(previous, window_start) else None
+    query_start = industry_financing_query_start(previous_for_merge, window_start)
+    expected_codes = {item["code"] for item in INDUSTRY_FINANCING_SERIES}
+    daily_by_code: dict[str, dict[str, float]] = {code: {} for code in expected_codes}
+    source_names: dict[str, str] = {}
+
+    for row in rows:
+        code = str(row.get("BOARD_CODE") or "")
+        if code not in expected_codes:
+            continue
+        date_text = str(row.get("TRADE_DATE") or "").split(" ")[0]
+        try:
+            trade_date = date.fromisoformat(date_text)
+        except ValueError:
+            continue
+        amount = safe_float(row.get("FIN_NETBUY_AMT"))
+        if trade_date < query_start or amount is None:
+            continue
+        daily_by_code[code][date_text] = amount
+        source_names[code] = str(row.get("BOARD_NAME") or source_names.get(code) or "")
+
+    new_dates = sorted({date_text for values in daily_by_code.values() for date_text in values})
+    if not new_dates:
+        raise RuntimeError("东方财富行业融资历史缺少有效日期或净买入数据")
+
+    prefix_dates: list[str] = []
+    prefix_start = 0
+    prefix_end = 0
+    previous_series_by_code: dict[str, dict[str, Any]] = {}
+    if previous_for_merge:
+        previous_dates = previous_for_merge["dates"]
+        prefix_start = sum(1 for item in previous_dates if item < window_start.isoformat())
+        prefix_end = sum(1 for item in previous_dates if item < query_start.isoformat())
+        prefix_dates = previous_dates[prefix_start:prefix_end]
+        previous_series_by_code = {str(item["code"]): item for item in previous_for_merge["series"]}
+
+    dates = [*prefix_dates, *new_dates]
+    series: list[dict[str, Any]] = []
+    for definition in INDUSTRY_FINANCING_SERIES:
+        code = definition["code"]
+        previous_values = previous_series_by_code.get(code, {}).get("values") or []
+        values: list[float | None] = []
+        baseline = next(
+            (number for number in reversed([safe_float(point) for point in previous_values[:prefix_start]]) if number is not None),
+            0.0,
+        )
+        for point in previous_values[prefix_start:prefix_end]:
+            number = safe_float(point)
+            values.append(round(number - baseline, 2) if number is not None else None)
+
+        running = next((point for point in reversed(values) if point is not None), None)
+        for date_text in new_dates:
+            amount = daily_by_code[code].get(date_text)
+            if amount is not None:
+                running = (running or 0.0) + amount / 100_000_000
+            values.append(round(running, 2) if running is not None else None)
+
+        latest = next((point for point in reversed(values) if point is not None), None)
+        series.append(
+            {
+                **definition,
+                "sourceName": (
+                    source_names.get(code)
+                    or previous_series_by_code.get(code, {}).get("sourceName")
+                    or definition["name"]
+                ),
+                "latest": latest,
+                "values": values,
+            }
+        )
+
+    return {
+        "status": "ok",
+        "title": INDUSTRY_FINANCING_TITLE,
+        "requestedStartDate": window_start.isoformat(),
+        "startDate": dates[0],
+        "endDate": dates[-1],
+        "unit": "亿元",
+        "source": "东方财富Choice行业融资融券",
+        "sourceUrl": EASTMONEY_RZRQ_INDUSTRY_URL,
+        "note": INDUSTRY_FINANCING_NOTE,
+        "dates": dates,
+        "series": series,
+    }
 
 
 def extract_table_rows(html: str) -> list[list[str]]:
@@ -2499,6 +2806,8 @@ def percentile_rank(value: float | None, history: list[float], min_samples: int 
 def has_stock_payload(data: dict[str, Any]) -> bool:
     markets = data.get("markets") or []
     if any(market.get("marketCap") or market.get("indices") for market in markets):
+        return True
+    if industry_financing_trend_has_data(data.get("industryFinancingTrend")):
         return True
     china_rows = data.get("china", {}).get("inflow", []) or data.get("china", {}).get("industries", [])
     if china_rows:

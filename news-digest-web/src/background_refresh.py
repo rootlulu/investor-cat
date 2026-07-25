@@ -5,6 +5,7 @@ import random
 from datetime import UTC, datetime
 from typing import Any
 
+from .ai_service import get_ai_news, get_ai_projects
 from .commodity_service import get_commodities
 from .consumption_service import get_consumption
 from .energy_service import get_energy
@@ -18,16 +19,36 @@ from .watchlist_service import prefetch_stock_watchlist_details
 REFRESH_LOCK = asyncio.Lock()
 REFRESH_TIMEOUT_SECONDS = {
     "news": 180,
+    "ai-news": 180,
+    "ai-projects": 180,
     "stocks": 900,
     "commodities": 180,
     "energy": 180,
     "consumption": 180,
     "macro": 180,
     "games": 180,
-    "xueqiu": 180,
+    "xueqiu": 360,
 }
 REFRESH_STATE: dict[str, dict[str, Any]] = {
     "news": {
+        "status": "idle",
+        "version": 0,
+        "runId": 0,
+        "startedAt": "",
+        "finishedAt": "",
+        "message": "",
+        "refreshed": False,
+    },
+    "ai-news": {
+        "status": "idle",
+        "version": 0,
+        "runId": 0,
+        "startedAt": "",
+        "finishedAt": "",
+        "message": "",
+        "refreshed": False,
+    },
+    "ai-projects": {
         "status": "idle",
         "version": 0,
         "runId": 0,
@@ -101,6 +122,8 @@ REFRESH_STATE: dict[str, dict[str, Any]] = {
     },
 }
 
+STARTUP_REFRESH_KINDS = tuple(REFRESH_STATE)
+
 
 async def start_background_refresh(kind: str, reason: str = "manual", force: bool = False) -> dict[str, Any]:
     if kind not in REFRESH_STATE:
@@ -120,6 +143,7 @@ async def start_background_refresh(kind: str, reason: str = "manual", force: boo
                 "finishedAt": "",
                 "message": f"{reason} 后台刷新中",
                 "refreshed": False,
+                "authRequired": False,
             }
         )
         asyncio.create_task(run_refresh(kind, reason, run_id, force))
@@ -127,14 +151,8 @@ async def start_background_refresh(kind: str, reason: str = "manual", force: boo
 
 
 async def start_startup_refreshes() -> None:
-    await start_background_refresh("news", "startup", force=True)
-    await start_background_refresh("stocks", "startup", force=False)
-    await start_background_refresh("commodities", "startup", force=True)
-    await start_background_refresh("energy", "startup", force=True)
-    await start_background_refresh("consumption", "startup", force=True)
-    await start_background_refresh("macro", "startup", force=True)
-    await start_background_refresh("games", "startup", force=True)
-    await start_background_refresh("xueqiu", "startup", force=True)
+    for kind in STARTUP_REFRESH_KINDS:
+        await start_background_refresh(kind, "startup", force=True)
 
 
 async def run_refresh(kind: str, reason: str, run_id: int, force: bool = False) -> None:
@@ -146,6 +164,16 @@ async def run_refresh(kind: str, reason: str, run_id: int, force: bool = False) 
         if kind == "news":
             data = await asyncio.wait_for(
                 get_news(refresh=True, allow_stale=False, force=force),
+                timeout=REFRESH_TIMEOUT_SECONDS[kind],
+            )
+        elif kind == "ai-news":
+            data = await asyncio.wait_for(
+                get_ai_news(refresh=True, allow_stale=False, force=force),
+                timeout=REFRESH_TIMEOUT_SECONDS[kind],
+            )
+        elif kind == "ai-projects":
+            data = await asyncio.wait_for(
+                get_ai_projects(refresh=True, allow_stale=False, force=force),
                 timeout=REFRESH_TIMEOUT_SECONDS[kind],
             )
         elif kind == "stocks":
@@ -194,6 +222,18 @@ async def run_refresh(kind: str, reason: str, run_id: int, force: bool = False) 
                 timeout=REFRESH_TIMEOUT_SECONDS[kind],
             )
 
+        if kind == "xueqiu" and data.get("authRequired"):
+            async with REFRESH_LOCK:
+                if state.get("runId") != run_id:
+                    return
+                state["status"] = "error"
+                state["finishedAt"] = now_iso()
+                state["refreshed"] = False
+                state["generatedAt"] = data.get("generatedAt", "")
+                state["message"] = data.get("loginMessage") or "雪球抓取失败，需要登录或完成滑块验证"
+                state["authRequired"] = True
+            return
+
         refreshed = (
             not data.get("cached")
             and not data.get("stale")
@@ -208,6 +248,7 @@ async def run_refresh(kind: str, reason: str, run_id: int, force: bool = False) 
             state["refreshed"] = refreshed
             state["generatedAt"] = data.get("generatedAt", "")
             state["message"] = "后台刷新完成" if refreshed else "半小时内已有快照，跳过真实抓取"
+            state["authRequired"] = False
             if refreshed:
                 state["version"] += 1
     except TimeoutError:

@@ -33,6 +33,8 @@ data/*.sqlite-*
 data/stock_watch_details.json
 data/xueqiu-browser-profile/
 data/playwright-libs/
+data/game-provider-profiles/
+data/game-provider-state.json
 
 # Local imported datasets; keep templates
 data/game_metrics.csv
@@ -48,6 +50,8 @@ data/game_sensor_tower_revenue.json
 # Local user configuration
 config/stock_watchlist.json
 config/xueqiu_influencers.json
+config/xueqiu_cookie.txt
+config/xueqiu_settings.json
 
 # Environment and secrets
 .env

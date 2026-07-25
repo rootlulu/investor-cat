@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowUpToLine, Boxes, Check, ExternalLink, FileText, Gamepad2, Landmark, LineChart, Newspaper, Pencil, RefreshCw, ShoppingBag, Snowflake, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, ArrowUpToLine, Boxes, BrainCircuit, Check, ExternalLink, FileText, Gamepad2, GitFork, Landmark, LineChart, Newspaper, Pencil, RefreshCw, ShoppingBag, Snowflake, Star, Trash2, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const AUTO_REFRESH_MS = 30 * 60 * 1000;
@@ -7,6 +7,32 @@ const INITIAL_VISIBLE = 50;
 const LOAD_MORE_SIZE = 25;
 const BEIJING_TIME_ZONE = "Asia/Shanghai";
 const BEIJING_TIME_OFFSET = "+08:00";
+const AI_NEWS_TABS = [
+  { id: "all", label: "全部新闻" },
+  { id: "models", label: "大模型" },
+  { id: "markets", label: "公司与股票" },
+  { id: "security", label: "国家安全" },
+  { id: "chips", label: "芯片算力" },
+  { id: "research", label: "研究开源" }
+];
+const AI_PROJECT_TABS = [
+  { id: "all", label: "全部精选", description: "固定 5 类，每类展示 Stars 最高的 30 个 AI 生产力项目；已排除 TensorFlow 一类通用模型训练框架。" },
+  { id: "coding-agents", label: "智能体", description: "能够直接完成任务的 AI 智能体，包括编程、写作、研究、浏览器操作和个人助理等用途。" },
+  { id: "skills", label: "Skills / 插件", description: "面向 Codex、Claude Code 等智能体的技能、命令、Hooks 与扩展包。" },
+  { id: "mcp", label: "MCP 工具", description: "连接文件、数据库、浏览器与外部服务的 MCP Server、SDK 和目录。" },
+  { id: "agent-frameworks", label: "Agent 框架", description: "Deep Agents 一类用于规划、编排、记忆和运行 Agent 的开发框架。" },
+  { id: "dev-workflows", label: "开发工作流", description: "上下文工程、代码审查、规范驱动开发、记忆和提示词等效率工具。" }
+];
+const COMMODITY_SECTOR_ORDER = ["贵金属", "有色金属", "黑色链", "大宗能源", "化工品", "建材", "化肥", "新能源材料", "农产品", "其他"];
+const COMMODITY_SECTOR_RANK = new Map(COMMODITY_SECTOR_ORDER.map((sector, index) => [sector, index]));
+const COMMODITY_ENERGY_IDS = new Set(["crude_oil", "fuel_oil", "lpg", "natural_gas"]);
+const COMMODITY_CHEMICAL_IDS = new Set(["asphalt", "methanol", "pta", "polypropylene", "polyethylene", "pvc", "rubber"]);
+const INDUSTRY_FINANCING_COLORS = [
+  "#5b9bd5", "#ed7d31", "#a5a5a5", "#ffc000", "#4472c4", "#70ad47", "#255e91", "#9e480e",
+  "#636363", "#997300", "#264478", "#43682b", "#7cafcb", "#f4b183", "#b7b7b7", "#ffd966",
+  "#5b6f9f", "#8fb36b", "#2e75b6", "#c55a11", "#7f8c8d", "#a9a000", "#365f91", "#8064a2",
+  "#9dc3e6", "#f4a261", "#c9c9c9", "#ffd45c", "#8faadc", "#a8c98a"
+];
 
 export default function App() {
   const path = window.location.pathname;
@@ -14,6 +40,8 @@ export default function App() {
     ? "games"
     : path.startsWith("/xueqiu")
       ? "xueqiu"
+      : path.startsWith("/ai")
+        ? "ai"
       : path.startsWith("/stocks")
         ? "stocks"
         : path.startsWith("/commodities")
@@ -32,12 +60,14 @@ export default function App() {
         ? "全球与中国游戏 Top100"
         : activePage === "xueqiu"
           ? "雪球"
+          : activePage === "ai"
+            ? "AI 情报"
           : activePage === "stocks"
             ? "股票市场流动性与估值"
             : activePage === "commodities"
             ? "大宗商品监控"
             : activePage === "energy"
-              ? "能源生产监控"
+              ? "能源供需监控"
               : activePage === "consumption"
                 ? "消费数据观察"
                 : activePage === "macro"
@@ -47,6 +77,7 @@ export default function App() {
 
   if (activePage === "games") return <GamesPageV2 />;
   if (activePage === "xueqiu") return <XueqiuPage />;
+  if (activePage === "ai") return <AiPage />;
   if (activePage === "stocks") return <StocksPage stockId={stockIdFromPath(path)} />;
   if (activePage === "commodities") return <CommoditiesPage />;
   if (activePage === "energy") return <EnergyPage />;
@@ -64,6 +95,7 @@ function PageShell({ eyebrow, title, activePage, actions, status, children }) {
           <h1>{title}</h1>
           <nav className="page-nav" aria-label="页面导航">
             <NavLink activePage={activePage} page="news" href="/news" icon={<Newspaper size={16} />} label="资讯" />
+            <NavLink activePage={activePage} page="ai" href="/ai" icon={<BrainCircuit size={16} />} label="AI" />
             <NavLink activePage={activePage} page="stocks" href="/stocks" icon={<LineChart size={16} />} label="股票" />
             <NavLink activePage={activePage} page="commodities" href="/commodities" icon={<Boxes size={16} />} label="大宗" />
             <NavLink activePage={activePage} page="energy" href="/energy" icon={<Zap size={16} />} label="能源" />
@@ -129,6 +161,272 @@ function NavLink({ activePage, page, href, icon, label }) {
 function stockIdFromPath(path) {
   const match = /^\/stocks\/([^/?#]+)/.exec(path);
   return match ? decodeURIComponent(match[1]) : "";
+}
+
+function AiPage() {
+  const [activeTab, setActiveTab] = useState(() => {
+    const requested = window.location.hash.replace(/^#/, "").split("/")[0];
+    return [...AI_NEWS_TABS.map((tab) => tab.id), "github"].includes(requested) ? requested : "all";
+  });
+  const [activeProjectCategory, setActiveProjectCategory] = useState(() => {
+    const [section, category] = window.location.hash.replace(/^#/, "").split("/");
+    return section === "github" && AI_PROJECT_TABS.some((tab) => tab.id === category) ? category : "all";
+  });
+  const [newsData, setNewsData] = useState({ items: [], categories: [], summary: {} });
+  const [projectsData, setProjectsData] = useState({ projects: [], categories: [], summary: {} });
+  const [newsStatus, setNewsStatus] = useState("正在获取最近一周 AI 新闻...");
+  const [projectsStatus, setProjectsStatus] = useState("正在获取 AI 生产力项目...");
+  const [refreshingNews, setRefreshingNews] = useState(false);
+  const [refreshingProjects, setRefreshingProjects] = useState(false);
+  const [newNewsIds, setNewNewsIds] = useState(new Set());
+
+  const knownNewsIds = useRef(new Set());
+  const lastNewsStatusText = useRef("");
+  const lastProjectsStatusText = useRef("");
+  const lastNewsRefreshFinishedAt = useRef("");
+  const lastProjectsRefreshFinishedAt = useRef("");
+
+  const loadAiNews = useCallback(async ({ markNew = false } = {}) => {
+    setNewsStatus("正在读取 AI 新闻单份快照...");
+    try {
+      const data = await getJson(`/api/ai-news?t=${Date.now()}`);
+      const nextItems = data.items || [];
+      const nextIds = new Set(nextItems.map((item) => item.id || newsId(item)));
+      const previousIds = new Set(knownNewsIds.current);
+      setNewsData({ ...data, items: nextItems, categories: data.categories || [], summary: data.summary || {} });
+      setNewNewsIds(markNew ? difference(nextIds, previousIds) : new Set());
+      knownNewsIds.current = nextIds;
+      const statusText = buildAiNewsStatus(data);
+      lastNewsStatusText.current = statusText;
+      setNewsStatus(statusText);
+      return true;
+    } catch (error) {
+      setNewsStatus(`AI 新闻获取失败：${error.message}`);
+      return false;
+    }
+  }, []);
+
+  const loadAiProjects = useCallback(async () => {
+    setProjectsStatus("正在读取 AI 生产力项目快照...");
+    try {
+      const data = await getJson(`/api/ai-projects?t=${Date.now()}`);
+      setProjectsData({ ...data, projects: data.projects || [], categories: data.categories || [], summary: data.summary || {} });
+      const statusText = buildAiProjectsStatus(data);
+      lastProjectsStatusText.current = statusText;
+      setProjectsStatus(statusText);
+      return true;
+    } catch (error) {
+      setProjectsStatus(`GitHub 项目获取失败：${error.message}`);
+      return false;
+    }
+  }, []);
+
+  const requestNewsRefresh = useBackgroundRefresh("ai-news", refreshingNews, setRefreshingNews, setNewsStatus, lastNewsStatusText);
+  const requestProjectsRefresh = useBackgroundRefresh("ai-projects", refreshingProjects, setRefreshingProjects, setProjectsStatus, lastProjectsStatusText);
+  useRefreshPolling("ai-news", loadAiNews, setRefreshingNews, setNewsStatus, lastNewsStatusText, lastNewsRefreshFinishedAt);
+  useRefreshPolling("ai-projects", loadAiProjects, setRefreshingProjects, setProjectsStatus, lastProjectsStatusText, lastProjectsRefreshFinishedAt);
+
+  useEffect(() => {
+    loadAiNews({ markNew: false });
+    loadAiProjects({ markNew: false });
+    const autoTimer = window.setInterval(() => {
+      requestNewsRefresh("timer", { force: false });
+      requestProjectsRefresh("timer", { force: false });
+    }, AUTO_REFRESH_MS);
+    return () => window.clearInterval(autoTimer);
+  }, [loadAiNews, loadAiProjects, requestNewsRefresh, requestProjectsRefresh]);
+
+  const categoryCounts = new Map((newsData.categories || []).map((category) => [category.id, category.count || 0]));
+  const projectCategoryCounts = new Map((projectsData.categories || []).map((category) => [category.id, category.count || 0]));
+  const projectTabs = AI_PROJECT_TABS.map((tab) => ({
+    ...tab,
+    count: tab.id === "all"
+      ? projectsData.projects.length
+      : projectCategoryCounts.get(tab.id) || projectsData.projects.filter((project) => project.productivityCategory === tab.id).length
+  }));
+  const tabs = [
+    ...AI_NEWS_TABS.map((tab) => ({ ...tab, count: tab.id === "all" ? newsData.items.length : categoryCounts.get(tab.id) || 0 })),
+    { id: "github", label: "GitHub 工具", count: projectsData.projects.length }
+  ];
+  const visibleNews = activeTab === "all" ? newsData.items : newsData.items.filter((item) => item.category === activeTab);
+  const showingProjects = activeTab === "github";
+  const selectTab = useCallback((tabId) => {
+    setActiveTab(tabId);
+    const hash = tabId === "github" && activeProjectCategory !== "all" ? `github/${activeProjectCategory}` : tabId;
+    window.history.replaceState(null, "", `${window.location.pathname}#${hash}`);
+  }, [activeProjectCategory]);
+  const selectProjectCategory = useCallback((categoryId) => {
+    setActiveProjectCategory(categoryId);
+    window.history.replaceState(null, "", `${window.location.pathname}#github/${categoryId}`);
+  }, []);
+
+  return (
+    <PageShell
+      eyebrow="近 7 天 AI 新闻 / AI 生产力项目"
+      title="AI 情报"
+      activePage="ai"
+      status={showingProjects ? projectsStatus : newsStatus}
+      actions={
+        <RefreshButton
+          loading={showingProjects ? refreshingProjects : refreshingNews}
+          title={showingProjects ? "刷新 AI 生产力项目" : "刷新最近一周 AI 新闻"}
+          onClick={showingProjects ? requestProjectsRefresh : requestNewsRefresh}
+        />
+      }
+    >
+      <section className="ai-overview" aria-label="AI 情报概览">
+        <Kpi label="近 7 天新闻" value={`${newsData.items.length || 0} 条`} />
+        <Kpi label="新闻分类" value={`${newsData.summary?.categoryCount || 0} 类`} />
+        <Kpi label="GitHub 精选" value={`${projectsData.projects.length || 0} 个`} />
+        <Kpi label="工具分类" value={`${projectsData.summary?.categoryCount || 0} 类`} />
+      </section>
+
+      <div className="ai-tabs" role="tablist" aria-label="AI 情报子栏目">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            className={activeTab === tab.id ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            onClick={() => selectTab(tab.id)}
+          >
+            {tab.id === "github" && <GitFork size={15} aria-hidden="true" />}
+            {tab.label}
+            <span>{tab.count}</span>
+          </button>
+        ))}
+      </div>
+
+      {showingProjects ? (
+        <AiProjectRanking
+          projects={projectsData.projects}
+          tabs={projectTabs}
+          activeCategory={activeProjectCategory}
+          onCategoryChange={selectProjectCategory}
+        />
+      ) : (
+        <section className="ai-news-panel" role="tabpanel" aria-live="polite">
+          <div className="section-title compact">
+            <span>{visibleNews.length}</span>
+            <h2>{tabs.find((tab) => tab.id === activeTab)?.label || "AI 新闻"}</h2>
+          </div>
+          {!visibleNews.length ? (
+            <p className="empty">最近一周暂未抓到这个分类的 AI 新闻。</p>
+          ) : (
+            <div className="ai-news-grid">
+              {visibleNews.map((item) => (
+                <NewsCard key={item.id || newsId(item)} item={item} isNew={newNewsIds.has(item.id || newsId(item))} showOriginalTitle={false} />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+    </PageShell>
+  );
+}
+
+function AiProjectRanking({ projects, tabs, activeCategory, onCategoryChange }) {
+  const activeTab = tabs.find((tab) => tab.id === activeCategory) || tabs[0] || AI_PROJECT_TABS[0];
+  const visibleProjects = activeCategory === "all"
+    ? projects
+    : projects.filter((project) => project.productivityCategory === activeCategory);
+
+  return (
+    <section className="ai-projects-panel" role="tabpanel" aria-live="polite">
+      <div className="github-category-nav">
+        <div className="github-category-heading">
+          <div>
+            <span className="github-category-kicker">按实际用途筛选</span>
+            <h2>AI 生产力工具</h2>
+          </div>
+          <small>每类展示 Stars Top 30</small>
+        </div>
+        <div className="github-category-tabs" role="tablist" aria-label="GitHub 工具分类">
+          {tabs.map((tab) => (
+            <button
+              id={`github-category-tab-${tab.id}`}
+              key={tab.id}
+              className={activeCategory === tab.id ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-controls="github-project-results"
+              aria-selected={activeCategory === tab.id}
+              onClick={() => onCategoryChange(tab.id)}
+            >
+              {tab.label}
+              <span>{tab.count}</span>
+            </button>
+          ))}
+        </div>
+        <p className="github-category-description">{activeTab.description}</p>
+      </div>
+      <div
+        id="github-project-results"
+        className="ai-project-category-panel"
+        role="tabpanel"
+        aria-labelledby={`github-category-tab-${activeTab.id}`}
+      >
+        <div className="section-title compact">
+          <span>{visibleProjects.length}</span>
+          <h2>{activeCategory === "all" ? "AI 生产力 GitHub 精选" : `${activeTab.label} · Stars 排名`}</h2>
+        </div>
+        <div className="stock-table-wrap ai-project-table-wrap">
+          <table className="stock-table ai-project-table">
+            <thead>
+              <tr>
+                <th>排名</th>
+                <th>项目</th>
+                <th>类型 / 作用</th>
+                <th>Stars</th>
+                <th>Forks</th>
+                <th>语言</th>
+                <th>最近推送</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!visibleProjects.length ? (
+                <tr>
+                  <td colSpan="7" className="table-empty">这个分类暂未获取到可用的 GitHub 项目。</td>
+                </tr>
+              ) : visibleProjects.map((project, index) => {
+                const displayRank = activeCategory === "all" ? project.rank : project.categoryRank || index + 1;
+                return (
+                  <tr key={project.id || project.fullName}>
+                    <td><strong className={`ai-rank rank-${displayRank}`}>#{displayRank}</strong></td>
+                    <td>
+                      <a className="ai-project-name" href={project.url} target="_blank" rel="noreferrer">
+                        {project.fullName || project.name}
+                        <ExternalLink size={13} aria-hidden="true" />
+                      </a>
+                      {project.descriptionZh && <p className="ai-project-note">{project.descriptionZh}</p>}
+                      {project.description && <p className="ai-project-original">原项目说明：{project.description}</p>}
+                      {!!project.topics?.length && (
+                        <div className="ai-project-topics">
+                          {project.topics.slice(0, 5).map((topic) => <span key={topic}>{topic}</span>)}
+                        </div>
+                      )}
+                    </td>
+                    <td className="ai-project-type-cell">
+                      <strong>{project.projectType || project.productivityCategoryLabel || "开发工具"}</strong>
+                      <small>{project.projectTypeDescription || project.productivityCategoryDescription || "AI 生产力开源项目"}</small>
+                    </td>
+                    <td>
+                      <strong className="ai-stars"><Star size={14} aria-hidden="true" />{formatVolume(project.stars)}</strong>
+                      <small>{Number(project.stars || 0).toLocaleString("zh-CN")}</small>
+                    </td>
+                    <td>{formatVolume(project.forks)}</td>
+                    <td>{project.language || "—"}{project.license && <small>{project.license}</small>}</td>
+                    <td>{formatTime(project.pushedAt)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function NewsPage() {
@@ -246,9 +544,11 @@ function NewsColumn({ number, title, items, visibleCount, newIds, newCount, onLo
   );
 }
 
-function NewsCard({ item, isNew }) {
+function NewsCard({ item, isNew, showOriginalTitle = true }) {
   const title = item.title || "未命名新闻";
-  const originalTitle = item.originalTitle && item.originalTitle !== title ? item.originalTitle : "";
+  const originalTitle = showOriginalTitle && item.originalTitle && item.originalTitle !== title ? item.originalTitle : "";
+  const topic = item.topic || "";
+  const subject = item.subject && item.subject !== topic ? item.subject : "";
 
   return (
     <article className={`news-card${isNew ? " is-new" : ""}`}>
@@ -258,6 +558,12 @@ function NewsCard({ item, isNew }) {
           {title}
         </a>
       </div>
+      {(topic || subject) && (
+        <div className="news-tags" aria-label="投资分类">
+          {topic && <span className="news-topic">{topic}</span>}
+          {subject && <span className="news-subject">{subject}</span>}
+        </div>
+      )}
       {originalTitle && <p className="original-title">原标题：{originalTitle}</p>}
       {item.summary && <p className="summary">{item.summary}</p>}
       {item.detail && <p className="detail">{item.detail}</p>}
@@ -271,6 +577,7 @@ function NewsCard({ item, isNew }) {
 
 function StocksPage({ stockId = "" }) {
   const [markets, setMarkets] = useState([]);
+  const [industryFinancingTrend, setIndustryFinancingTrend] = useState(null);
   const [watchlist, setWatchlist] = useState([]);
   const [newMarketKeys, setNewMarketKeys] = useState(new Set());
   const [snapshotAt, setSnapshotAt] = useState("");
@@ -308,6 +615,7 @@ function StocksPage({ stockId = "" }) {
       }
 
       setMarkets(nextMarkets);
+      setIndustryFinancingTrend(data.industryFinancingTrend || null);
       setWatchlist(nextWatchlist);
       setSelectedStockId((current) => {
         const desired = current || stockId;
@@ -491,6 +799,8 @@ function StocksPage({ stockId = "" }) {
         )}
       </section>
 
+      <IndustryFinancingTrendChart trend={industryFinancingTrend} />
+
       <WatchlistTable
         items={watchlist}
         importQuery={importQuery}
@@ -515,6 +825,323 @@ function StocksPage({ stockId = "" }) {
     </PageShell>
   );
 }
+
+function IndustryFinancingTrendChart({ trend }) {
+  const [hiddenSeries, setHiddenSeries] = useState(new Set());
+  const [legendFocusId, setLegendFocusId] = useState("");
+  const [hover, setHover] = useState(null);
+  const svgRef = useRef(null);
+  const dates = Array.isArray(trend?.dates) ? trend.dates : [];
+  const series = (Array.isArray(trend?.series) ? trend.series : []).map((item, index) => ({
+    ...item,
+    color: INDUSTRY_FINANCING_COLORS[index % INDUSTRY_FINANCING_COLORS.length]
+  }));
+  const visibleSeries = series.filter((item) => !hiddenSeries.has(item.id));
+  const hasData = dates.length > 0 && visibleSeries.some((item) => item.values?.some((value) => finiteChartNumber(value) !== null));
+  const title = trend?.title || "近三年，各行业的融资盘累计净买入";
+
+  const width = 1440;
+  const height = 650;
+  const margin = { top: 36, right: 30, bottom: 102, left: 86 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const scale = industryFinancingChartScale(visibleSeries);
+  const xAt = (index) => margin.left + (dates.length <= 1 ? 0 : (index / (dates.length - 1)) * plotWidth);
+  const yAt = (value) => margin.top + ((scale.max - value) / (scale.max - scale.min)) * plotHeight;
+  const dateTicks = chartDateTickIndices(dates.length, 20);
+  const focusSeriesId = legendFocusId || hover?.seriesId || "";
+  const hoveredSeries = visibleSeries.find((item) => item.id === hover?.seriesId);
+  const hoveredValue = hoveredSeries && hover ? finiteChartNumber(hoveredSeries.values?.[hover.index]) : null;
+  const hoverX = hover ? xAt(hover.index) : 0;
+  const hoverY = hoveredValue === null ? 0 : yAt(hoveredValue);
+
+  const toggleSeries = (seriesId) => {
+    setHiddenSeries((current) => {
+      const next = new Set(current);
+      if (next.has(seriesId)) {
+        next.delete(seriesId);
+      } else if (series.length - next.size > 1) {
+        next.add(seriesId);
+      }
+      return next;
+    });
+    setHover(null);
+  };
+
+  const handlePointerMove = (event) => {
+    const svg = svgRef.current;
+    if (!svg || dates.length === 0 || visibleSeries.length === 0) return;
+    const bounds = svg.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
+    const viewX = ((event.clientX - bounds.left) / bounds.width) * width;
+    const viewY = ((event.clientY - bounds.top) / bounds.height) * height;
+    const clampedX = Math.min(margin.left + plotWidth, Math.max(margin.left, viewX));
+    const index = dates.length <= 1 ? 0 : Math.round(((clampedX - margin.left) / plotWidth) * (dates.length - 1));
+    let nearest = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    for (const item of visibleSeries) {
+      const value = finiteChartNumber(item.values?.[index]);
+      if (value === null) continue;
+      const distance = Math.abs(yAt(value) - viewY);
+      if (distance < nearestDistance) {
+        nearest = item;
+        nearestDistance = distance;
+      }
+    }
+
+    if (nearest) setHover({ index, seriesId: nearest.id });
+  };
+
+  return (
+    <section className="industry-financing-section" aria-live="polite">
+      <div className="industry-financing-head">
+        <div>
+          <span className="industry-financing-kicker">行业两融趋势</span>
+          <h2>{title}</h2>
+        </div>
+        {dates.length > 0 && (
+          <div className="industry-financing-meta">
+            <span>{formatIndustryChartDate(trend.startDate)} — {formatIndustryChartDate(trend.endDate)}</span>
+            <span>单位：{trend.unit || "亿元"}</span>
+            {trend.sourceUrl ? (
+              <a href={trend.sourceUrl} target="_blank" rel="noreferrer">
+                {trend.source || "东方财富"}
+                <ExternalLink size={12} aria-hidden="true" />
+              </a>
+            ) : (
+              <span>{trend.source || "东方财富"}</span>
+            )}
+            {trend.status === "stale" && <span className="industry-financing-stale">上次快照</span>}
+          </div>
+        )}
+      </div>
+
+      {!hasData ? (
+        <p className="empty">{trend ? trend.note || "暂未取到行业融资历史。" : "正在读取行业融资历史..."}</p>
+      ) : (
+        <>
+          <div className="industry-financing-chart-scroll">
+            <div className="industry-financing-chart-canvas">
+              <svg
+                ref={svgRef}
+                className="industry-financing-chart"
+                viewBox={`0 0 ${width} ${height}`}
+                role="img"
+                aria-label={`${title}，${formatIndustryChartDate(trend.startDate)}至${formatIndustryChartDate(trend.endDate)}，单位${trend.unit || "亿元"}`}
+                onPointerMove={handlePointerMove}
+                onPointerLeave={() => setHover(null)}
+              >
+                <title>{title}</title>
+                <text className="industry-financing-unit" x={margin.left} y={18}>{trend.unit || "亿元"}</text>
+
+                {scale.ticks.map((tick) => {
+                  const y = yAt(tick);
+                  return (
+                    <g key={tick}>
+                      <line
+                        className={tick === 0 ? "industry-financing-zero-line" : "industry-financing-grid-line"}
+                        x1={margin.left}
+                        x2={margin.left + plotWidth}
+                        y1={y}
+                        y2={y}
+                      />
+                      <text
+                        className={tick < 0 ? "industry-financing-axis-label is-negative" : "industry-financing-axis-label"}
+                        x={margin.left - 12}
+                        y={y + 4}
+                        textAnchor="end"
+                      >
+                        {formatIndustryAxisValue(tick)}
+                      </text>
+                    </g>
+                  );
+                })}
+
+                {dateTicks.map((index) => {
+                  const x = xAt(index);
+                  return (
+                    <g key={`${dates[index]}-${index}`}>
+                      <line className="industry-financing-x-tick" x1={x} x2={x} y1={margin.top + plotHeight} y2={margin.top + plotHeight + 6} />
+                      <text
+                        className="industry-financing-date-label"
+                        x={x - 2}
+                        y={margin.top + plotHeight + 18}
+                        textAnchor="end"
+                        transform={`rotate(-58 ${x - 2} ${margin.top + plotHeight + 18})`}
+                      >
+                        {formatIndustryChartDate(dates[index])}
+                      </text>
+                    </g>
+                  );
+                })}
+
+                {visibleSeries.map((item) => {
+                  const path = buildIndustryLinePath(item.values || [], xAt, yAt);
+                  if (!path) return null;
+                  const focused = !focusSeriesId || focusSeriesId === item.id;
+                  return (
+                    <path
+                      key={item.id}
+                      className="industry-financing-line"
+                      d={path}
+                      fill="none"
+                      stroke={item.color}
+                      strokeWidth={focusSeriesId === item.id ? 3 : 1.55}
+                      opacity={focused ? 0.92 : 0.12}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  );
+                })}
+
+                {hover && hoveredSeries && hoveredValue !== null && (
+                  <g className="industry-financing-hover" pointerEvents="none">
+                    <line x1={hoverX} x2={hoverX} y1={margin.top} y2={margin.top + plotHeight} />
+                    <circle cx={hoverX} cy={hoverY} r={5} fill={hoveredSeries.color} />
+                    <g transform={`translate(${Math.min(width - 224, Math.max(margin.left + 4, hoverX + (hoverX > width - 260 ? -216 : 12)))}, ${Math.min(margin.top + plotHeight - 62, Math.max(margin.top + 8, hoverY - 28))})`}>
+                      <rect width="204" height="54" rx="7" />
+                      <text x="11" y="20">{formatIndustryChartDate(dates[hover.index])} · {hoveredSeries.name}</text>
+                      <text className="industry-financing-tooltip-value" x="11" y="41">
+                        {formatIndustryFinancingValue(hoveredValue)} {trend.unit || "亿元"}
+                      </text>
+                    </g>
+                  </g>
+                )}
+
+                <rect
+                  className="industry-financing-hit-area"
+                  x={margin.left}
+                  y={margin.top}
+                  width={plotWidth}
+                  height={plotHeight}
+                />
+              </svg>
+            </div>
+          </div>
+
+          <div className="industry-financing-legend" aria-label="行业图例">
+            {series.map((item) => {
+              const hidden = hiddenSeries.has(item.id);
+              return (
+                <button
+                  key={item.id}
+                  className={hidden ? "is-hidden" : ""}
+                  type="button"
+                  aria-pressed={!hidden}
+                  title={`${hidden ? "显示" : "隐藏"}${item.name}`}
+                  style={{ "--series-color": item.color }}
+                  onClick={() => toggleSeries(item.id)}
+                  onMouseEnter={() => !hidden && setLegendFocusId(item.id)}
+                  onMouseLeave={() => setLegendFocusId("")}
+                  onFocus={() => !hidden && setLegendFocusId(item.id)}
+                  onBlur={() => setLegendFocusId("")}
+                >
+                  <span aria-hidden="true" />
+                  {item.name}
+                </button>
+              );
+            })}
+            {hiddenSeries.size > 0 && (
+              <button className="industry-financing-show-all" type="button" onClick={() => setHiddenSeries(new Set())}>
+                显示全部
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {trend?.note && <p className="industry-financing-note">{trend.note}</p>}
+    </section>
+  );
+}
+
+
+function finiteChartNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+
+function industryFinancingChartScale(series) {
+  const values = [];
+  for (const item of series) {
+    for (const point of item.values || []) {
+      const number = finiteChartNumber(point);
+      if (number !== null) values.push(number);
+    }
+  }
+  if (!values.length) return { min: -1, max: 1, ticks: [-1, 0, 1] };
+
+  const observedMin = Math.min(0, ...values);
+  const observedMax = Math.max(0, ...values);
+  const observedRange = observedMax - observedMin || Math.max(Math.abs(observedMax), 1);
+  const paddedMin = observedMin < 0 ? observedMin - observedRange * 0.035 : 0;
+  const paddedMax = observedMax + observedRange * 0.035;
+  const step = niceIndustryChartStep((paddedMax - paddedMin) / 20);
+  const min = Math.floor(paddedMin / step) * step;
+  const max = Math.max(step, Math.ceil(paddedMax / step) * step);
+  const ticks = [];
+  for (let value = min; value <= max + step / 2; value += step) {
+    ticks.push(Number(value.toFixed(8)));
+  }
+  return { min, max, ticks };
+}
+
+
+function niceIndustryChartStep(rawStep) {
+  if (!Number.isFinite(rawStep) || rawStep <= 0) return 1;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const fraction = rawStep / magnitude;
+  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
+  return niceFraction * magnitude;
+}
+
+
+function chartDateTickIndices(length, preferredCount) {
+  if (length <= 0) return [];
+  if (length <= preferredCount) return Array.from({ length }, (_, index) => index);
+  const indices = new Set();
+  for (let index = 0; index < preferredCount; index += 1) {
+    indices.add(Math.round((index / (preferredCount - 1)) * (length - 1)));
+  }
+  return [...indices].sort((left, right) => left - right);
+}
+
+
+function buildIndustryLinePath(values, xAt, yAt) {
+  let path = "";
+  let drawing = false;
+  values.forEach((point, index) => {
+    const value = finiteChartNumber(point);
+    if (value === null) {
+      drawing = false;
+      return;
+    }
+    path += `${drawing ? "L" : "M"}${xAt(index).toFixed(2)},${yAt(value).toFixed(2)}`;
+    drawing = true;
+  });
+  return path;
+}
+
+
+function formatIndustryChartDate(value) {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return value || "";
+  return `${match[1]}/${Number(match[2])}/${Number(match[3])}`;
+}
+
+
+function formatIndustryAxisValue(value) {
+  const formatted = Math.abs(value).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
+  return value < 0 ? `(${formatted})` : formatted;
+}
+
+
+function formatIndustryFinancingValue(value) {
+  return Number(value).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 
 function WatchlistTable({
   items,
@@ -663,19 +1290,53 @@ function XueqiuPage() {
   const [influencers, setInfluencers] = useState([]);
   const [activities, setActivities] = useState([]);
   const [summary, setSummary] = useState({});
-  const [todayLabel, setTodayLabel] = useState("");
+  const [rangeLabel, setRangeLabel] = useState("");
   const [newIds, setNewIds] = useState(new Set());
   const [status, setStatus] = useState("正在获取雪球大V动态...");
   const [refreshing, setRefreshing] = useState(false);
   const [importQuery, setImportQuery] = useState("");
   const [importStatus, setImportStatus] = useState("");
   const [importBusy, setImportBusy] = useState(false);
+  const [selectedSuggestion, setSelectedSuggestion] = useState(null);
   const [removingIds, setRemovingIds] = useState(new Set());
   const [filter, setFilter] = useState("all");
+  const [authPrompt, setAuthPrompt] = useState({ open: false, status: "idle", message: "", qrDataUrl: "", loading: false });
 
   const knownSignatures = useRef(new Map());
   const lastStatusText = useRef("");
   const lastRefreshFinishedAt = useRef("");
+  const authPromptActive = useRef(false);
+  const authCheckBusy = useRef(false);
+
+  const startXueqiuAuth = useCallback(async ({ force = false } = {}) => {
+    authPromptActive.current = true;
+    setAuthPrompt((current) => ({
+      ...current,
+      open: true,
+      loading: true,
+      status: "loading",
+      message: "正在生成雪球登录二维码..."
+    }));
+    try {
+      const params = new URLSearchParams({ force: String(force), t: Date.now().toString() });
+      const data = await getJson(`/api/xueqiu/auth/qrcode?${params}`, { method: "POST" });
+      setAuthPrompt((current) => ({
+        open: true,
+        loading: false,
+        status: data.status || "pending",
+        message: data.message || "请用雪球 App 扫码登录。",
+        qrDataUrl: data.qrDataUrl || current.qrDataUrl || ""
+      }));
+    } catch (error) {
+      setAuthPrompt((current) => ({
+        ...current,
+        open: true,
+        loading: false,
+        status: "error",
+        message: `二维码生成失败：${error.message}`
+      }));
+    }
+  }, []);
 
   const applyXueqiuData = useCallback((data, { markNew = false } = {}) => {
     const nextActivities = data.activities || [];
@@ -692,14 +1353,17 @@ function XueqiuPage() {
     setInfluencers(data.influencers || []);
     setActivities(nextActivities);
     setSummary(data.summary || {});
-    setTodayLabel(data.todayLabel || "");
+    setRangeLabel(data.rangeLabel || data.todayLabel || "");
     setNewIds(changedIds);
     knownSignatures.current = nextSignatures;
 
     const statusText = buildXueqiuStatus(data);
     lastStatusText.current = statusText;
     setStatus(statusText);
-  }, []);
+    if ((data.authRequired || data.loginRequired) && !authPromptActive.current) {
+      startXueqiuAuth();
+    }
+  }, [startXueqiuAuth]);
 
   const loadXueqiu = useCallback(async ({ markNew = false } = {}) => {
     setStatus("正在读取本地快照...");
@@ -726,18 +1390,34 @@ function XueqiuPage() {
       const data = await getJson(`/api/xueqiu/import?t=${Date.now()}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query })
+        body: JSON.stringify({
+          query: selectedSuggestion?.userId || query,
+          name: selectedSuggestion?.name || ""
+        })
       });
       applyXueqiuData(data, { markNew: false });
       const influencer = data.influencer || {};
       setImportQuery("");
+      setSelectedSuggestion(null);
       setImportStatus(`${data.imported ? "已导入" : "已存在"}：${influencer.name || query}`);
     } catch (error) {
       setImportStatus(`导入失败：${error.message}`);
     } finally {
       setImportBusy(false);
     }
-  }, [applyXueqiuData, importQuery]);
+  }, [applyXueqiuData, importQuery, selectedSuggestion]);
+
+  const updateImportQuery = useCallback((value) => {
+    setImportQuery(value);
+    setSelectedSuggestion(null);
+    setImportStatus("");
+  }, []);
+
+  const selectImportSuggestion = useCallback((suggestion) => {
+    setSelectedSuggestion(suggestion);
+    setImportQuery(suggestion.name || suggestion.userId || "");
+    setImportStatus(suggestion.imported ? "该用户已经导入" : `已选择：${suggestion.name || suggestion.userId}`);
+  }, []);
 
   const removeInfluencer = useCallback(async (influencer) => {
     const id = influencer.id;
@@ -762,17 +1442,65 @@ function XueqiuPage() {
   const requestBackgroundRefresh = useBackgroundRefresh("xueqiu", refreshing, setRefreshing, setStatus, lastStatusText);
   useRefreshPolling("xueqiu", loadXueqiu, setRefreshing, setStatus, lastStatusText, lastRefreshFinishedAt);
 
+  const closeXueqiuAuth = useCallback(async () => {
+    authPromptActive.current = false;
+    setAuthPrompt((current) => ({ ...current, open: false, loading: false }));
+    try {
+      await getJson(`/api/xueqiu/auth/session?t=${Date.now()}`, { method: "DELETE" });
+    } catch {
+      // Closing the modal should not be blocked by cleanup failures.
+    }
+  }, []);
+
+  const checkXueqiuAuth = useCallback(async () => {
+    if (authCheckBusy.current) return;
+    authCheckBusy.current = true;
+    try {
+      const data = await getJson(`/api/xueqiu/auth/status?t=${Date.now()}`);
+      if (data.status === "authenticated") {
+        authPromptActive.current = false;
+        setAuthPrompt((current) => ({ ...current, open: false, loading: false, status: "authenticated", message: data.message || "雪球扫码登录已确认。" }));
+        setStatus(data.message || "雪球扫码登录已确认，正在重新抓取动态。");
+        requestBackgroundRefresh("manual", { force: true });
+        return;
+      }
+      setAuthPrompt((current) => ({
+        ...current,
+        open: true,
+        loading: false,
+        status: data.status || current.status,
+        message: data.message || current.message,
+        qrDataUrl: data.qrDataUrl || current.qrDataUrl
+      }));
+    } catch (error) {
+      setAuthPrompt((current) => ({
+        ...current,
+        open: true,
+        loading: false,
+        status: "error",
+        message: `登录状态检查失败：${error.message}`
+      }));
+    } finally {
+      authCheckBusy.current = false;
+    }
+  }, [requestBackgroundRefresh]);
+
+  useEffect(() => {
+    if (!authPrompt.open || authPrompt.status !== "pending") return undefined;
+    const timer = window.setInterval(checkXueqiuAuth, STATUS_POLL_MS);
+    checkXueqiuAuth();
+    return () => window.clearInterval(timer);
+  }, [authPrompt.open, authPrompt.status, checkXueqiuAuth]);
+
   useEffect(() => {
     loadXueqiu({ markNew: false });
-    const autoTimer = window.setInterval(() => requestBackgroundRefresh("timer", { force: false }), AUTO_REFRESH_MS);
-    return () => window.clearInterval(autoTimer);
-  }, [loadXueqiu, requestBackgroundRefresh]);
+  }, [loadXueqiu]);
 
   const filteredActivities = filter === "all" ? activities : activities.filter((item) => item.kind === filter);
 
   return (
     <PageShell
-      eyebrow="今日大V动态 / 帖子 / 评论 / 回复"
+      eyebrow="近7天大V动态 / 帖子 / 评论 / 回复"
       title="雪球"
       activePage="xueqiu"
       status={status}
@@ -780,7 +1508,7 @@ function XueqiuPage() {
     >
       <section className="xueqiu-overview" aria-label="雪球概览">
         <Kpi label="大V" value={`${summary.influencerCount || influencers.length || 0} 位`} />
-        <Kpi label="今日动态" value={`${summary.activityCount || activities.length || 0} 条`} />
+        <Kpi label="近7天动态" value={`${summary.activityCount || activities.length || 0} 条`} />
         <Kpi label="帖子" value={`${summary.postCount || 0} 条`} />
         <Kpi label="评论/回复" value={`${(summary.commentCount || 0) + (summary.replyCount || 0)} 条`} />
       </section>
@@ -792,13 +1520,12 @@ function XueqiuPage() {
             <h2>导入大V</h2>
           </div>
           <form className="watchlist-import xueqiu-import" onSubmit={importInfluencer}>
-            <input
-              type="text"
+            <XueqiuUserAutocomplete
               value={importQuery}
-              onChange={(event) => setImportQuery(event.target.value)}
-              placeholder="雪球主页链接 / 用户ID / 昵称"
-              aria-label="导入雪球大V"
-              disabled={importBusy}
+              selected={selectedSuggestion}
+              busy={importBusy}
+              onChange={updateImportQuery}
+              onSelect={selectImportSuggestion}
             />
             <button className="secondary-action" type="submit" disabled={importBusy}>
               {importBusy ? "导入中" : "导入"}
@@ -813,7 +1540,7 @@ function XueqiuPage() {
         <div className="xueqiu-feed-head">
           <div className="section-title compact watchlist-title">
             <span>{filteredActivities.length}</span>
-            <h2>{todayLabel ? `${todayLabel}动态` : "今日动态"}</h2>
+            <h2>{rangeLabel ? `${rangeLabel}动态` : "近7天动态"}</h2>
           </div>
           <XueqiuFilterTabs activeFilter={filter} summary={summary} total={activities.length} onChange={setFilter} />
         </div>
@@ -825,8 +1552,164 @@ function XueqiuPage() {
           )}
         </div>
       </section>
+      {authPrompt.open && (
+        <XueqiuAuthModal
+          prompt={authPrompt}
+          onClose={closeXueqiuAuth}
+          onCheck={checkXueqiuAuth}
+          onRefresh={() => startXueqiuAuth({ force: true })}
+        />
+      )}
     </PageShell>
   );
+}
+
+function XueqiuUserAutocomplete({ value, selected, busy, onChange, onSelect }) {
+  const [suggestions, setSuggestions] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const listboxId = "xueqiu-user-suggestions";
+
+  useEffect(() => {
+    const query = value.trim();
+    const isDirectIdentifier = /xueqiu\.com\//i.test(query) || /^\d{5,}$/.test(query);
+    if (!query || busy || isDirectIdentifier || (selected && (selected.name === query || selected.userId === query))) {
+      setSuggestions([]);
+      setLoading(false);
+      setMessage("");
+      setOpen(false);
+      setActiveIndex(-1);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    setSuggestions([]);
+    setLoading(true);
+    setMessage("");
+    setOpen(true);
+    setActiveIndex(-1);
+    const timer = window.setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ q: query, limit: "6", t: Date.now().toString() });
+        const data = await getJson(`/api/xueqiu/search-users?${params}`, { signal: controller.signal });
+        const nextSuggestions = data.suggestions || [];
+        setSuggestions(nextSuggestions);
+        setMessage(data.message || "");
+        setActiveIndex(nextSuggestions.length ? 0 : -1);
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        setSuggestions([]);
+        setMessage(`搜索失败：${error.message}`);
+        setActiveIndex(-1);
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [busy, selected, value]);
+
+  const chooseSuggestion = useCallback((suggestion) => {
+    onSelect(suggestion);
+    setOpen(false);
+    setActiveIndex(-1);
+  }, [onSelect]);
+
+  const handleKeyDown = (event) => {
+    if (event.key === "Escape") {
+      setOpen(false);
+      setActiveIndex(-1);
+      return;
+    }
+    if (!suggestions.length) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setOpen(true);
+      setActiveIndex((current) => Math.min(suggestions.length - 1, current + 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setOpen(true);
+      setActiveIndex((current) => Math.max(0, current - 1));
+    } else if (event.key === "Enter" && open && activeIndex >= 0) {
+      event.preventDefault();
+      chooseSuggestion(suggestions[activeIndex]);
+    }
+  };
+
+  return (
+    <div
+      className="xueqiu-user-autocomplete"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}
+    >
+      <input
+        type="text"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onFocus={() => {
+          if (suggestions.length || loading || message) setOpen(true);
+        }}
+        onKeyDown={handleKeyDown}
+        placeholder="输入雪球昵称搜索 / 主页链接 / 用户ID"
+        aria-label="搜索并导入雪球大V"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-controls={listboxId}
+        aria-expanded={open}
+        aria-activedescendant={open && activeIndex >= 0 ? `${listboxId}-${activeIndex}` : undefined}
+        autoComplete="off"
+        disabled={busy}
+      />
+      {open && (
+        <div className="xueqiu-user-suggestions" id={listboxId} role="listbox" aria-label="雪球用户搜索结果">
+          {loading && <div className="xueqiu-suggestion-message">正在搜索雪球用户...</div>}
+          {!loading && suggestions.map((suggestion, index) => (
+            <button
+              id={`${listboxId}-${index}`}
+              key={suggestion.id || suggestion.userId}
+              className={`xueqiu-user-suggestion${index === activeIndex ? " is-active" : ""}`}
+              type="button"
+              role="option"
+              aria-selected={index === activeIndex}
+              onMouseDown={(event) => event.preventDefault()}
+              onMouseEnter={() => setActiveIndex(index)}
+              onClick={() => chooseSuggestion(suggestion)}
+            >
+              <XueqiuSuggestionAvatar suggestion={suggestion} />
+              <span className="xueqiu-suggestion-copy">
+                <strong>{suggestion.name || `雪球用户 ${suggestion.userId}`}</strong>
+                <small>
+                  {[suggestion.verified ? "已认证" : "", formatFollowers(suggestion.followersCount), suggestion.description].filter(Boolean).join(" / ") || `用户ID ${suggestion.userId}`}
+                </small>
+              </span>
+              {suggestion.imported && <b>已导入</b>}
+            </button>
+          ))}
+          {!loading && !suggestions.length && message && <div className="xueqiu-suggestion-message has-error">{message}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function XueqiuSuggestionAvatar({ suggestion }) {
+  const [failed, setFailed] = useState(false);
+  const avatarUrl = suggestion.avatarUrl || "";
+
+  useEffect(() => {
+    setFailed(false);
+  }, [avatarUrl]);
+
+  if (avatarUrl && !failed) {
+    return <img src={avatarUrl} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
+  }
+  return <span className="xueqiu-suggestion-avatar" aria-hidden="true">{(suggestion.name || "雪").slice(0, 1)}</span>;
 }
 
 function XueqiuInfluencerList({ influencers, removingIds, onRemove }) {
@@ -875,31 +1758,100 @@ function XueqiuFilterTabs({ activeFilter, summary, total, onChange }) {
   );
 }
 
+function XueqiuAuthModal({ prompt, onClose, onCheck, onRefresh }) {
+  return (
+    <div className="auth-modal-backdrop" role="presentation">
+      <section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="xueqiu-auth-title">
+        <header>
+          <div>
+            <p className="market-label">雪球登录</p>
+            <h2 id="xueqiu-auth-title">扫码验证</h2>
+          </div>
+          <button className="icon-action" type="button" title="关闭登录窗口" aria-label="关闭登录窗口" onClick={onClose}>
+            <X size={16} aria-hidden="true" />
+          </button>
+        </header>
+        <div className="auth-qr-frame">
+          {prompt.loading ? (
+            <p className="empty">正在生成二维码。</p>
+          ) : prompt.qrDataUrl ? (
+            <img src={prompt.qrDataUrl} alt="雪球登录二维码" />
+          ) : (
+            <p className="empty">二维码暂不可用。</p>
+          )}
+        </div>
+        <p className={`auth-modal-message ${prompt.status === "error" ? "has-error" : ""}`}>{prompt.message || "请用雪球 App 扫码登录。"}</p>
+        <footer>
+          <button className="secondary-action" type="button" disabled={prompt.loading} onClick={onRefresh}>
+            <RefreshCw size={16} aria-hidden="true" />
+            刷新二维码
+          </button>
+          <button className="primary-action" type="button" disabled={prompt.loading} onClick={onCheck}>
+            <Check size={16} aria-hidden="true" />
+            我已扫码
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function XueqiuActivityCard({ item, isNew }) {
+  const originalUrl = xueqiuOriginalUrl(item);
+  const profileUrl = item.profileUrl || (item.userId ? `https://xueqiu.com/u/${item.userId}` : "");
+  const interactionText = [
+    item.replyCount ? `评论 ${formatNumber(item.replyCount, 0)}` : "",
+    item.retweetCount ? `转发 ${formatNumber(item.retweetCount, 0)}` : "",
+    item.likeCount ? `赞 ${formatNumber(item.likeCount, 0)}` : ""
+  ].filter(Boolean).join(" / ") || "暂无互动数据";
+
   return (
     <article className={`xueqiu-card${isNew ? " is-new" : ""}`}>
       <header>
         <span className={`activity-type ${item.kind || "post"}`}>{item.kindLabel || "动态"}</span>
-        <a href={item.url || "#"} target="_blank" rel="noreferrer">
+        <a className="xueqiu-author-link" href={profileUrl || originalUrl || "#"} target="_blank" rel="noreferrer">
           {item.influencerName || "雪球用户"}
           <ExternalLink size={13} aria-hidden="true" />
         </a>
+        {originalUrl && (
+          <a className="xueqiu-original-link" href={originalUrl} target="_blank" rel="noreferrer" title="打开雪球原文">
+            <ExternalLink size={12} aria-hidden="true" />
+            原文
+          </a>
+        )}
         <time dateTime={item.publishedAt}>{formatTime(item.publishedAt)}</time>
       </header>
-      <p>{item.text}</p>
+      {item.text && (
+        originalUrl ? (
+          <a className="xueqiu-body-link" href={originalUrl} target="_blank" rel="noreferrer">
+            <p>{item.text}</p>
+          </a>
+        ) : (
+          <p>{item.text}</p>
+        )
+      )}
       {item.targetTitle && <blockquote>{item.targetTitle}</blockquote>}
+      <XueqiuMediaGrid media={item.media} />
       {item.note && <small className="xueqiu-note">{item.note}</small>}
       <footer>
         <span className="source">{item.source || "雪球"}</span>
-        <span>
-          {[
-            item.replyCount ? `评论 ${formatNumber(item.replyCount, 0)}` : "",
-            item.retweetCount ? `转发 ${formatNumber(item.retweetCount, 0)}` : "",
-            item.likeCount ? `赞 ${formatNumber(item.likeCount, 0)}` : ""
-          ].filter(Boolean).join(" / ") || "暂无互动数据"}
-        </span>
+        <span>{interactionText}</span>
       </footer>
     </article>
+  );
+}
+
+function XueqiuMediaGrid({ media }) {
+  const images = (media || []).filter((item) => item?.type === "image" && item.url).slice(0, 9);
+  if (!images.length) return null;
+  return (
+    <div className={`xueqiu-media-grid${images.length === 1 ? " single" : ""}`}>
+      {images.map((item, index) => (
+        <a key={`${item.url}-${index}`} href={item.url} target="_blank" rel="noreferrer" title="打开图片">
+          <img src={item.url} alt={item.label || `雪球图片 ${index + 1}`} loading="lazy" />
+        </a>
+      ))}
+    </div>
   );
 }
 
@@ -1478,111 +2430,215 @@ function CommoditySection({ sector, items, newKeys }) {
         <h2>{sector}</h2>
       </div>
       <div className="stock-table-wrap">
-        <table className="stock-table commodity-table">
-          <thead>
-            <tr>
-              <th>品种</th>
-              <th>现货</th>
-              <th>国内期货</th>
-              <th>国际期货</th>
-              <th>现货升贴水</th>
-              <th>内外盘差</th>
-              <th>库存</th>
-              <th>更新/来源</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((item) => {
-              const hasSpot = hasValue(item.spotPrice);
-              const hasDomesticFuture = hasValue(item.domesticFuturePrice);
-              const hasGlobalFuture = hasValue(item.globalFuturePrice);
-              const hasBenchmarkFuture = hasValue(item.benchmarkFuturePrice);
-              const hasBasis = hasValue(item.basis);
-              const hasCrossMarketSpread = hasValue(item.crossMarketSpread);
-              const hasInventory = hasValue(item.inventory);
-              const sourceDate = item.spotDate || item.domesticFutureDate || item.globalFutureDate || item.benchmarkFutureDate || item.inventoryDate || "";
-              const sourceText = [item.source, item.note].filter(Boolean).join("；");
-
-              return (
-                <tr key={item.id} className={newKeys.has(item.id) ? "is-new-row" : ""}>
-                  <td>
-                    <strong>{item.name}</strong>
-                    {(item.spotName || item.domesticFutureName || item.globalFutureName || item.benchmarkFutureName) && <small>{item.spotName || item.domesticFutureName || item.globalFutureName || item.benchmarkFutureName}</small>}
-                  </td>
-                  <td>
-                    {hasSpot && (
-                      <>
-                        {formatPrice(item.spotPrice, item.spotUnit || item.unit)}
-                        {(item.spotRange || hasValue(item.spotChange)) && <small>{item.spotRange || formatChange(item.spotChange)}</small>}
-                        <MiniKline history={item.spotHistory} label={`${item.name}现货价格K线`} />
-                      </>
-                    )}
-                  </td>
-                  <td>
-                    {hasDomesticFuture && (
-                      <>
-                        {formatPrice(item.domesticFuturePrice, item.unit)}
-                        {(item.domesticFutureName || item.domesticFutureSymbol || hasValue(item.domesticFutureChangePct)) && (
-                          <small className={pctClass(item.domesticFutureChangePct)}>
-                            {[item.domesticFutureName || item.domesticFutureSymbol, hasValue(item.domesticFutureChangePct) ? formatPct(item.domesticFutureChangePct) : ""].filter(Boolean).join(" ")}
-                          </small>
-                        )}
-                        <MiniKline history={item.domesticFutureHistory} label={`${item.name}期货价格K线`} valueKey="close" />
-                      </>
-                    )}
-                  </td>
-                  <td>
-                    {(hasGlobalFuture || hasBenchmarkFuture) && (
-                      <>
-                        {formatGlobalPrice(hasGlobalFuture ? item.globalFuturePrice : item.benchmarkFuturePrice)}
-                        <small className={pctClass(hasGlobalFuture ? item.globalFutureChangePct : item.benchmarkFutureChangePct)}>
-                          {hasGlobalFuture
-                            ? [item.globalFutureName || item.globalFutureSymbol, hasValue(item.globalFutureChangePct) ? formatPct(item.globalFutureChangePct) : ""].filter(Boolean).join(" ")
-                            : [`上游基准 ${item.benchmarkFutureName || item.benchmarkFutureSymbol}`.trim(), hasValue(item.benchmarkFutureChangePct) ? formatPct(item.benchmarkFutureChangePct) : ""].filter(Boolean).join(" ")}
-                        </small>
-                      </>
-                    )}
-                  </td>
-                  <td className={pctClass(item.basis)}>
-                    {hasBasis && (
-                      <>
-                        {formatBasis(item.basis, item.unit)}
-                        {(hasValue(item.basisPct) || item.basisSource || item.basisFutureContract) && (
-                          <small>{hasValue(item.basisPct) ? `${formatPctPlain(item.basisPct)}${item.basisFutureContract ? ` / ${item.basisFutureContract}合约` : ""}` : item.basisSource}</small>
-                        )}
-                      </>
-                    )}
-                  </td>
-                  <td className={pctClass(item.crossMarketSpread)}>
-                    {hasCrossMarketSpread && (
-                      <>
-                        {formatCrossMarketSpread(item.crossMarketSpread)}
-                        {hasValue(item.crossMarketSpreadPct) && <small>{formatPctPlain(item.crossMarketSpreadPct)}</small>}
-                      </>
-                    )}
-                  </td>
-                  <td>
-                    {hasInventory && (
-                      <>
-                        {formatInventory(item)}
-                        {hasValue(item.inventoryChange) && <small className={pctClass(item.inventoryChange)}>{formatInventoryChange(item)}</small>}
-                        <MiniKline history={item.inventoryHistory} label={`${item.name}库存K线`} />
-                        {item.inventoryDate && <small>{item.inventoryDate}</small>}
-                      </>
-                    )}
-                  </td>
-                  <td>
-                    {sourceDate}
-                    {sourceText && <small>{sourceText}</small>}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <div className="commodity-product-board">
+          <div className="commodity-product-grid commodity-product-head">
+            <span>品种</span>
+            <span>市场</span>
+            <span>现货/基准</span>
+            <span>现货K线</span>
+            <span>期货价格</span>
+            <span>期货K线</span>
+            <span>升贴水/价差</span>
+            <span>库存</span>
+            <span>来源</span>
+          </div>
+          {items.map((item) => (
+            <CommodityProductCard key={item.id} item={item} isNew={newKeys.has(item.id)} />
+          ))}
+        </div>
       </div>
     </section>
   );
+}
+
+function CommodityProductCard({ item, isNew }) {
+  const marketRows = buildCommodityMarketRows(item);
+  const subtitle = [item.spotName, item.domesticFutureName || item.domesticFutureSymbol, item.globalFutureName || item.benchmarkFutureName].filter(Boolean).slice(0, 2).join(" / ");
+
+  return (
+    <article className={`commodity-product-card${isNew ? " is-new-row" : ""}`}>
+      <div className="commodity-product-name">
+        <strong>{item.name}</strong>
+        {subtitle && <small>{subtitle}</small>}
+      </div>
+      <div className="commodity-market-lines">
+        {marketRows.map((row) => (
+          <div key={`${item.id}-${row.id}`} className={`commodity-product-grid commodity-market-line commodity-market-line-${row.id}`}>
+            <div className="commodity-market-cell">
+              <span className={`commodity-market-badge ${row.id === "international" ? "is-global" : "is-domestic"}`}>{row.label}</span>
+            </div>
+            <div className="commodity-metric-cell">
+              <CommodityReferenceCell item={item} row={row} />
+            </div>
+            <div className="commodity-kline-cell">
+              <CommoditySpotKlineCell item={item} row={row} />
+            </div>
+            <div className="commodity-metric-cell">
+              <CommodityFutureCell row={row} />
+            </div>
+            <div className="commodity-kline-cell">
+              <CommodityKlineCell item={item} row={row} />
+            </div>
+            <div className={`commodity-metric-cell ${pctClass(row.spreadValue)}`}>
+              <CommoditySpreadCell item={item} row={row} />
+            </div>
+            <div className="commodity-inventory-cell">
+              <CommodityInventoryCell item={item} row={row} />
+            </div>
+            <CommoditySourceCell item={item} row={row} />
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function buildCommodityMarketRows(item) {
+  const rows = [];
+  const hasDomestic = hasValue(item.domesticFuturePrice) || hasValue(item.spotPrice) || hasValue(item.basis) || hasValue(item.inventory);
+  const hasGlobal = hasValue(item.globalFuturePrice) || hasValue(item.benchmarkFuturePrice) || (item.globalFutureHistory || []).length > 0 || (item.benchmarkFutureHistory || []).length > 0;
+
+  if (hasDomestic) {
+    rows.push({
+      id: "domestic",
+      label: "国内",
+      futurePrice: item.domesticFuturePrice,
+      futureUnit: item.unit,
+      futureName: item.domesticFutureName || item.domesticFutureSymbol,
+      futureSymbol: item.domesticFutureSymbol,
+      futureChangePct: item.domesticFutureChangePct,
+      history: item.domesticFutureHistory || [],
+      date: item.domesticFutureDate || item.spotDate || item.inventoryDate || "",
+      spreadValue: item.basis,
+      spreadPct: item.basisPct,
+      spreadLabel: "现货升贴水",
+      spreadDetail: hasValue(item.basisPct) ? `${formatPctPlain(item.basisPct)}${item.basisFutureContract ? ` / ${item.basisFutureContract}合约` : ""}` : item.basisSource,
+      sourceText: [item.source, item.note].filter(Boolean).join("；")
+    });
+  }
+
+  if (hasGlobal) {
+    const useGlobal = hasValue(item.globalFuturePrice) || (item.globalFutureHistory || []).length > 0;
+    rows.push({
+      id: "international",
+      label: "国际",
+      futurePrice: useGlobal ? item.globalFuturePrice : item.benchmarkFuturePrice,
+      futureUnit: "",
+      futureName: useGlobal ? item.globalFutureName || item.globalFutureSymbol : item.benchmarkFutureName || item.benchmarkFutureSymbol,
+      futureSymbol: useGlobal ? item.globalFutureSymbol : item.benchmarkFutureSymbol,
+      futureChangePct: useGlobal ? item.globalFutureChangePct : item.benchmarkFutureChangePct,
+      history: useGlobal ? item.globalFutureHistory || [] : item.benchmarkFutureHistory || [],
+      date: useGlobal ? item.globalFutureDate : item.benchmarkFutureDate,
+      spreadValue: item.crossMarketSpread,
+      spreadPct: item.crossMarketSpreadPct,
+      spreadLabel: "内外盘差",
+      spreadDetail: hasValue(item.crossMarketSpreadPct) ? formatPctPlain(item.crossMarketSpreadPct) : "",
+      sourceText: [useGlobal ? "新浪外盘" : "上游基准盘", item.note].filter(Boolean).join("；")
+    });
+  }
+
+  return rows.length ? rows : [{ id: "domestic", label: "国内", history: [], sourceText: item.source || "" }];
+}
+
+function CommodityReferenceCell({ item, row }) {
+  if (row.id === "international") {
+    return (
+      <>
+        <span className="commodity-muted">国际盘</span>
+        {row.futureName && <small>{row.futureName}</small>}
+      </>
+    );
+  }
+
+  if (!hasValue(item.spotPrice)) return <span className="sparkline-empty">暂无</span>;
+  return (
+    <>
+      {formatPrice(item.spotPrice, item.spotUnit || item.unit)}
+      {(item.spotRange || hasValue(item.spotChange)) && <small>{item.spotRange || formatChange(item.spotChange)}</small>}
+    </>
+  );
+}
+
+function CommoditySpotKlineCell({ item, row }) {
+  if (row.id !== "domestic" || (item.spotHistory || []).length < 2) return <span className="sparkline-empty">暂无</span>;
+  return <MiniKline history={item.spotHistory} label={`${item.name}现货价格K线`} width={128} height={34} />;
+}
+
+function CommodityFutureCell({ row }) {
+  if (!hasValue(row.futurePrice)) return <span className="sparkline-empty">暂无</span>;
+  return (
+    <>
+      {row.id === "international" ? formatGlobalPrice(row.futurePrice) : formatPrice(row.futurePrice, row.futureUnit)}
+      {(row.futureName || row.futureSymbol || hasValue(row.futureChangePct)) && (
+        <small className={pctClass(row.futureChangePct)}>
+          {[row.futureName || row.futureSymbol, hasValue(row.futureChangePct) ? formatPct(row.futureChangePct) : ""].filter(Boolean).join(" ")}
+        </small>
+      )}
+    </>
+  );
+}
+
+function CommodityKlineCell({ item, row }) {
+  if ((row.history || []).length < 2) return <span className="sparkline-empty">暂无</span>;
+  return <MiniKline history={row.history} label={`${item.name}${row.label}期货价格K线`} valueKey="close" width={128} height={34} />;
+}
+
+function CommoditySpreadCell({ row }) {
+  if (!hasValue(row.spreadValue)) return <span className="sparkline-empty">暂无</span>;
+  return (
+    <>
+      {row.id === "international" ? formatCrossMarketSpread(row.spreadValue) : formatBasis(row.spreadValue, row.futureUnit)}
+      {(row.spreadDetail || row.spreadLabel) && <small>{row.spreadDetail || row.spreadLabel}</small>}
+    </>
+  );
+}
+
+function CommodityInventoryCell({ item, row }) {
+  if (!hasValue(item.inventory)) return <span className="sparkline-empty">暂无</span>;
+  return (
+    <>
+      {formatInventory(item)}
+      {hasValue(item.inventoryChange) && <small className={pctClass(item.inventoryChange)}>{formatInventoryChange(item)}</small>}
+      <MiniKline history={item.inventoryHistory} label={`${item.name}${row.label}库存K线`} />
+      {item.inventoryDate && <small>{item.inventoryDate}</small>}
+    </>
+  );
+}
+
+function CommoditySourceCell({ item, row }) {
+  const sourceText = row.sourceText || item.source || "";
+  return (
+    <div className="commodity-source-cell" title={sourceText}>
+      <strong>{row.date || item.inventoryDate || ""}</strong>
+      {sourceText && <small>{compactCommoditySource(sourceText, row.id)}</small>}
+    </div>
+  );
+}
+
+function compactCommoditySource(value, marketId = "") {
+  const text = String(value || "");
+  const labels = [
+    ["SMM", "SMM"],
+    ["新浪外盘", "新浪外盘"],
+    ["新浪期货", "新浪期货"],
+    ["新浪现货", "新浪现货"],
+    ["生意社", "生意社"],
+    ["东方财富期货库存", "东方财富库存"],
+    ["SHFE", "上期所"],
+    ["上游基准盘", "上游基准"],
+  ];
+  const result = [];
+  labels.forEach(([needle, label]) => {
+    if (marketId === "domestic" && label === "新浪外盘") return;
+    if (marketId === "international" && ["SMM", "新浪期货", "东方财富库存", "上期所"].includes(label)) return;
+    if (text.includes(needle) && !result.includes(label)) result.push(label);
+  });
+  return result.slice(0, 3).join(" / ") || compactText(text, 18);
+}
+
+function compactText(value, maxLength) {
+  const text = String(value || "").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
 function EnergyPage() {
@@ -1639,8 +2695,8 @@ function EnergyPage() {
 
   return (
     <PageShell
-      eyebrow="国家统计局 / 煤炭 / 天然气 / 电力"
-      title="能源生产监控"
+      eyebrow="国家统计局 / 能源生产 / 发电结构"
+      title="能源供需监控"
       activePage="energy"
       status={status}
       actions={<RefreshButton loading={refreshing} title="刷新能源数据" onClick={requestBackgroundRefresh} />}
@@ -1745,7 +2801,7 @@ function EnergySection({ section, newKeys }) {
 function EnergyKline({ row }) {
   const points = Array.isArray(row.history) ? row.history.filter((point) => Number.isFinite(Number(point.close ?? point.value))) : [];
   if (points.length < 2) return <span className="sparkline-empty">暂无</span>;
-  return <MiniKline history={row.history} label={`${row.name || "能源指标"}近月K线`} />;
+  return <MiniKline history={row.history} label={`${row.name || "能源指标"}近18个月K线`} className="energy-kline" width={180} height={36} />;
 }
 
 function EnergyHistory({ row }) {
@@ -2063,6 +3119,8 @@ function GamesPageV2() {
   const [newKeys, setNewKeys] = useState(new Set());
   const [status, setStatus] = useState("正在获取游戏榜单数据...");
   const [refreshing, setRefreshing] = useState(false);
+  const [providerAuth, setProviderAuth] = useState({ providers: [], policy: {} });
+  const [providerBusy, setProviderBusy] = useState("");
 
   const knownSignatures = useRef(new Map());
   const lastStatusText = useRef("");
@@ -2105,14 +3163,74 @@ function GamesPageV2() {
     }
   }, []);
 
+  const loadProviderAuth = useCallback(async () => {
+    try {
+      setProviderAuth(await getJson(`/api/games/providers/auth?t=${Date.now()}`));
+    } catch (error) {
+      setStatus(`读取榜单登录状态失败：${error.message}`);
+    }
+  }, []);
+
+  const runProviderLoginAction = useCallback(async (provider, action) => {
+    const actionKey = `${provider}:${action}`;
+    const routes = {
+      login: { url: `/api/games/providers/${provider}/login`, method: "POST" },
+      complete: { url: `/api/games/providers/${provider}/login/complete`, method: "POST" },
+      cancel: { url: `/api/games/providers/${provider}/login`, method: "DELETE" },
+    };
+    const route = routes[action];
+    if (!route) return;
+    setProviderBusy(actionKey);
+    try {
+      const result = await getJson(route.url, { method: route.method });
+      await loadProviderAuth();
+      setStatus(result.message || (action === "login" ? "登录窗口已打开，请在窗口中手动登录。" : "登录会话已保存。"));
+    } catch (error) {
+      setStatus(`${provider === "qimai" ? "七麦" : "点点"}登录操作失败：${error.message}`);
+    } finally {
+      setProviderBusy("");
+    }
+  }, [loadProviderAuth]);
+
+  const crawlProvider = useCallback(async (provider) => {
+    const countryCode = selectedCountry || "cn";
+    setProviderBusy(`${provider}:crawl`);
+    setStatus(`正在低频采集${provider === "qimai" ? "七麦" : "点点"} ${countryCode.toUpperCase()} 免费榜和畅销榜...`);
+    try {
+      const result = await getJson(`/api/games/providers/${provider}/crawl?country_code=${encodeURIComponent(countryCode)}`, {
+        method: "POST",
+      });
+      if (result.games) {
+        setGameData(result.games);
+        knownSignatures.current = collectGameDashboardSignatures(result.games);
+        lastStatusText.current = buildGamesStatusV2(result.games);
+      }
+      await loadProviderAuth();
+      setStatus(result.message || "榜单采集完成。");
+    } catch (error) {
+      setStatus(`榜单采集已停止：${error.message}`);
+    } finally {
+      setProviderBusy("");
+    }
+  }, [loadProviderAuth, selectedCountry]);
+
+  const providerLoginPending = (providerAuth.providers || []).some((item) => ["starting", "login_open"].includes(item.status));
+
   const requestBackgroundRefresh = useBackgroundRefresh("games", refreshing, setRefreshing, setStatus, lastStatusText);
   useRefreshPolling("games", loadGames, setRefreshing, setStatus, lastStatusText, lastRefreshFinishedAt);
 
   useEffect(() => {
     loadGames({ markNew: false });
+    loadProviderAuth();
     const autoTimer = window.setInterval(() => requestBackgroundRefresh("timer", { force: false }), AUTO_REFRESH_MS);
     return () => window.clearInterval(autoTimer);
-  }, [loadGames, requestBackgroundRefresh]);
+  }, [loadGames, loadProviderAuth, requestBackgroundRefresh]);
+
+  useEffect(() => {
+    if (!providerLoginPending) return undefined;
+    const timer = window.setInterval(loadProviderAuth, 2000);
+    return () => window.clearInterval(timer);
+  }, [loadProviderAuth, providerLoginPending]);
 
   const markets = gameData.markets || [];
   const rankProviders = gameData.rankProviders || [];
@@ -2121,7 +3239,6 @@ function GamesPageV2() {
   const selectedProviderCountry =
     (selectedRankProvider.countries || []).find((country) => country.code === selectedCountry) || selectedRankProvider.countries?.[0] || {};
   const summary = gameData.summary || {};
-
   return (
     <PageShell
       eyebrow="Sensor Tower 流水 / 点点榜单 / 七麦榜单"
@@ -2138,7 +3255,16 @@ function GamesPageV2() {
         <Kpi label="30国榜单" value={`${summary.rankingRows || 0} 条`} />
       </section>
 
-      <GameProviderStatusGridV2 statuses={gameData.providerStatus || []} />
+      <GameProviderStatusGridV2
+        statuses={gameData.providerStatus || []}
+        authStates={providerAuth.providers || []}
+        policy={providerAuth.policy || {}}
+        selectedCountry={selectedProviderCountry}
+        busy={providerBusy}
+        onLogin={(provider) => runProviderLoginAction(provider, "login")}
+        onCancel={(provider) => runProviderLoginAction(provider, "cancel")}
+        onCrawl={crawlProvider}
+      />
 
       <GameMarketTablesV2 markets={markets} newKeys={newKeys} />
 
@@ -2177,24 +3303,79 @@ function GamesPageV2() {
   );
 }
 
-function GameProviderStatusGridV2({ statuses }) {
+function GameProviderStatusGridV2({ statuses, authStates, policy, selectedCountry, busy, onLogin, onCancel, onCrawl }) {
   return (
     <section className="game-provider-grid" aria-label="三方数据接入状态">
-      {statuses.map((status) => (
-        <article key={status.id} className={`game-provider-card ${status.status || ""}`}>
-          <p className="market-label">{status.role}</p>
-          <h2>{status.name}</h2>
-          <strong>{providerStatusLabelV2(status.status)}</strong>
-          <span>{status.message}</span>
-          {status.homeUrl && (
-            <a href={status.homeUrl} target="_blank" rel="noreferrer">
-              打开来源
-            </a>
-          )}
-        </article>
-      ))}
+      {statuses.map((status) => {
+        const auth = authStates.find((item) => item.id === status.id);
+        const isRankProvider = status.id === "qimai" || status.id === "diandian";
+        const authStatus = auth?.status || "idle";
+        const isLoginOpen = ["starting", "login_open"].includes(authStatus);
+        const actionBusy = busy.startsWith(`${status.id}:`);
+        const diandianCountrySupported = status.id !== "diandian" || ["cn", "us", "jp", "tw"].includes(selectedCountry?.code);
+        return (
+          <article key={status.id} className={`game-provider-card ${status.status || ""}`}>
+            <p className="market-label">{status.role}</p>
+            <h2>{status.name}</h2>
+            <strong>{providerStatusLabelV2(status.status)}</strong>
+            <span>{status.message}</span>
+            {isRankProvider && auth && (
+              <div className={`game-auth-state ${auth.status || "idle"}`}>
+                <b>{providerAuthLabelV2(auth.status)}</b>
+                <span>{auth.message}</span>
+              </div>
+            )}
+            {isRankProvider ? (
+              <div className="game-provider-actions">
+                {isLoginOpen ? (
+                  <>
+                    <button type="button" disabled>
+                      {authStatus === "starting" ? "正在打开登录窗口..." : "登录窗口已打开"}
+                    </button>
+                    <button className="secondary-action" type="button" disabled={actionBusy} onClick={() => onCancel(status.id)}>
+                      取消
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button type="button" disabled={actionBusy} onClick={() => onLogin(status.id)}>
+                      {authStatus === "idle" ? "打开微信登录窗口" : "重新打开登录窗口"}
+                    </button>
+                    <button
+                      className="secondary-action"
+                      type="button"
+                      disabled={actionBusy || authStatus === "idle" || !diandianCountrySupported}
+                      title={diandianCountrySupported ? `采集${selectedCountry?.name || "当前国家"}免费榜与畅销榜` : "点点当前只支持中国、美国、日本和中国台湾"}
+                      onClick={() => onCrawl(status.id)}
+                    >
+                      {busy === `${status.id}:crawl` ? "采集中..." : `采集${selectedCountry?.name || "当前国家"}`}
+                    </button>
+                  </>
+                )}
+                <small>会弹出独立官方登录窗口；{policy.minIntervalMinutes || 30} 分钟限频；验证码/403/429 立即停止。</small>
+              </div>
+            ) : status.homeUrl && (
+              <a href={status.homeUrl} target="_blank" rel="noreferrer">
+                打开来源
+              </a>
+            )}
+          </article>
+        );
+      })}
     </section>
   );
+}
+
+function providerAuthLabelV2(status) {
+  const labels = {
+    idle: "未登录",
+    starting: "正在打开登录窗口",
+    login_open: "等待窗口内登录",
+    error: "登录启动失败",
+    saved: "会话已保存",
+    verified: "登录态已验证",
+  };
+  return labels[status] || "状态未知";
 }
 
 function GameMarketTablesV2({ markets, newKeys }) {
@@ -2467,7 +3648,12 @@ function MacroCountry({ country, newKeys }) {
               <span>{group.items?.length || 0}</span>
               <h3>{group.name}</h3>
             </div>
-            <div className="stock-table-wrap">
+            <div
+              className="stock-table-wrap macro-table-scroll"
+              role="region"
+              aria-label={`${country.name} · ${group.name}列表`}
+              tabIndex={0}
+            >
               <table className="stock-table macro-table">
                 <thead>
                   <tr>
@@ -2605,7 +3791,7 @@ function useRefreshPolling(kind, loadData, setRefreshing, setStatus, lastStatusT
             setStatus(refreshStatusText(lastStatusText.current || fallback, refresh, "半小时内已有快照"));
           } else if (refresh.status === "error") {
             await loadData({ markNew: false });
-            setStatus(refreshStatusText(lastStatusText.current || fallback, refresh, "后台刷新失败"));
+            setStatus(refresh.authRequired ? (lastStatusText.current || refresh.message || fallback) : refreshStatusText(lastStatusText.current || fallback, refresh, "后台刷新失败"));
           }
         } finally {
           setRefreshing(false);
@@ -2709,7 +3895,7 @@ function MacroKline({ item }) {
   );
 }
 
-function MiniKline({ history, label, valueKey = "value" }) {
+function MiniKline({ history, label, valueKey = "value", className = "", width = 112, height = 32 }) {
   const points = Array.isArray(history)
     ? history
         .map((point) => {
@@ -2727,8 +3913,6 @@ function MiniKline({ history, label, valueKey = "value" }) {
 
   if (points.length < 2) return null;
 
-  const width = 112;
-  const height = 32;
   const padding = 3;
   const values = points.flatMap((point, index) => {
     const previousClose = index === 0 ? point.close : points[index - 1].close;
@@ -2749,7 +3933,7 @@ function MiniKline({ history, label, valueKey = "value" }) {
   const up = last.close >= first.close;
 
   return (
-    <svg className={`macro-kline commodity-mini-kline ${up ? "up-line" : "down-line"}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label}，${first.period}至${last.period}`}>
+    <svg className={`macro-kline commodity-mini-kline ${className} ${up ? "up-line" : "down-line"}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label}，${first.period}至${last.period}`}>
       <path className="sparkline-grid" d={`M${padding},${height - padding}H${width - padding}`} />
       {points.map((point, index) => {
         const previousClose = index === 0 ? point.close : points[index - 1].close;
@@ -2803,6 +3987,29 @@ function buildNewsStatus(data, news) {
   const sources = (data.sources || []).map((source) => source.name).join("、") || "公开来源";
   const errorHint = data.errors?.length ? `；部分来源异常：${data.errors.join("；")}` : "";
   return `已更新：${formatTime(data.generatedAt)}${cacheHint}${storageHint}${throttleHint}${staleHint}${countHint}；来源：${sources}${errorHint}`;
+}
+
+function buildAiNewsStatus(data) {
+  const count = data.summary?.itemCount ?? data.items?.length ?? 0;
+  const categoryCount = data.summary?.categoryCount ?? data.categories?.filter((category) => category.count).length ?? 0;
+  const cacheHint = data.cached ? (data.fromStorage ? "；SQLite 单份快照" : "；内存快照") : "";
+  const throttleHint = data.throttled ? "；半小时内不重复抓取" : "";
+  const staleHint = data.stale ? "；旧快照" : "";
+  const errorHint = data.errors?.length ? `；部分来源异常 ${data.errors.length} 项` : "";
+  return `已更新：${formatTime(data.generatedAt)}${cacheHint}${throttleHint}${staleHint}；最近7天 ${count} 条、${categoryCount} 类；来源：${data.source || "Google News RSS"}${errorHint}`;
+}
+
+function buildAiProjectsStatus(data) {
+  const count = data.summary?.projectCount ?? data.projects?.length ?? 0;
+  const candidates = data.summary?.candidateCount || 0;
+  const categories = data.summary?.categoryCount || 0;
+  const perCategoryLimit = data.perCategoryLimit || 30;
+  const cacheHint = data.cached ? (data.fromStorage ? "；SQLite 单份快照" : "；内存快照") : "";
+  const throttleHint = data.throttled ? "；半小时内不重复抓取" : "";
+  const staleHint = data.stale ? "；旧快照" : "";
+  const authHint = data.rateLimit?.authenticated ? "；GitHub Token" : "；公开额度";
+  const errorHint = data.errors?.length ? `；部分检索异常 ${data.errors.length} 项` : "";
+  return `已更新：${formatTime(data.generatedAt)}${cacheHint}${throttleHint}${staleHint}；${categories} 类、每类 Stars Top ${perCategoryLimit}，共 ${count} 个，候选 ${candidates} 个；来源：${data.source || "GitHub Search API"}${authHint}${errorHint}`;
 }
 
 function buildStocksStatus(data) {
@@ -2862,8 +4069,15 @@ function buildGamesStatusV2(data) {
 }
 
 function buildXueqiuStatus(data) {
+  if (data.authRequired || data.loginRequired) {
+    return data.loginMessage || "雪球抓取失败，需要登录或完成滑块验证";
+  }
+  if (data.needsRefresh) {
+    const summary = data.summary || {};
+    return `已导入${summary.influencerCount || 0}位雪球大V；点击刷新抓取最新动态`;
+  }
   const summary = data.summary || {};
-  const count = `；大V${summary.influencerCount || 0}位；今日动态${summary.activityCount || 0}条；帖子${summary.postCount || 0}条；评论/回复${(summary.commentCount || 0) + (summary.replyCount || 0)}条`;
+  const count = `；大V${summary.influencerCount || 0}位；近7天动态${summary.activityCount || 0}条；帖子${summary.postCount || 0}条；评论/回复${(summary.commentCount || 0) + (summary.replyCount || 0)}条`;
   return `${buildGenericStatus(data, data.source || "雪球公开主页/API")}${count}`;
 }
 
@@ -2981,13 +4195,17 @@ function collectNewsIds(news) {
 function collectXueqiuSignatures(activities) {
   const map = new Map();
   (activities || []).forEach((item) => {
-    map.set(xueqiuActivityId(item), [item.kind, item.text, item.targetTitle, item.publishedAt, item.replyCount, item.retweetCount, item.likeCount].join("|"));
+    map.set(xueqiuActivityId(item), [item.kind, item.text, item.targetTitle, item.originalUrl || item.url, JSON.stringify(item.media || []), item.publishedAt, item.replyCount, item.retweetCount, item.likeCount].join("|"));
   });
   return map;
 }
 
 function xueqiuActivityId(item) {
   return item.id || `${item.influencerId || item.influencerName}-${item.kind}-${item.publishedAt}-${item.text}`;
+}
+
+function xueqiuOriginalUrl(item) {
+  return item?.originalUrl || item?.url || "";
 }
 
 function countNewItems(items = [], newIds = new Set()) {
@@ -3047,6 +4265,8 @@ function collectCommoditySignatures(items) {
         item.inventoryChange,
         JSON.stringify(item.spotHistory || []),
         JSON.stringify(item.domesticFutureHistory || []),
+        JSON.stringify(item.globalFutureHistory || []),
+        JSON.stringify(item.benchmarkFutureHistory || []),
         JSON.stringify(item.inventoryHistory || [])
       ].join("|")
     )
@@ -3285,11 +4505,26 @@ function formatGameDelta(row, sources) {
 function groupBySector(items) {
   const groups = new Map();
   items.forEach((item) => {
-    const sector = item.sector || "其他";
+    const sector = normalizeCommoditySector(item);
     if (!groups.has(sector)) groups.set(sector, []);
     groups.get(sector).push(item);
   });
-  return Array.from(groups.entries());
+  return Array.from(groups.entries()).sort(([left], [right]) => {
+    const rankDiff = (COMMODITY_SECTOR_RANK.get(left) ?? 99) - (COMMODITY_SECTOR_RANK.get(right) ?? 99);
+    if (rankDiff !== 0) return rankDiff;
+    return left.localeCompare(right, "zh-CN");
+  });
+}
+
+function normalizeCommoditySector(item) {
+  const sector = item.sector || "其他";
+  if (sector === "黑色煤焦钢矿") return "黑色链";
+  if (sector === "建材化工") return item.id === "urea" ? "化肥" : "建材";
+  if (sector === "能源化工") {
+    if (COMMODITY_ENERGY_IDS.has(item.id)) return "大宗能源";
+    if (COMMODITY_CHEMICAL_IDS.has(item.id)) return "化工品";
+  }
+  return sector;
 }
 
 function buildMarketNote(market) {

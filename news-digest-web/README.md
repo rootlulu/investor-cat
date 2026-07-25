@@ -4,12 +4,13 @@
 
 ## 项目内容
 
-当前前端包含 8 个主要页面：
+当前前端包含 9 个主要页面：
 
 | 页面 | 路径 | 内容 |
 | --- | --- | --- |
 | 资讯 | `/news` | 最近一周中国及港澳新闻、世界重要新闻，支持 Markdown 输出 |
-| 股票 | `/stocks`、`/stocks/{stock_id}` | A股、港股、美股市场流动性与估值，自选股详情、新闻、公告、评级、资金流、社区热帖 |
+| AI | `/ai` | 最近 7 天 AI 中文新闻分类浏览，以及按用途分为 5 类、每类 Stars Top 30 的 GitHub AI 生产力项目；智能体覆盖编程、写作、研究和浏览器操作等用途 |
+| 股票 | `/stocks`、`/stocks/{stock_id}` | A股、港股、美股市场流动性与估值，滚动近三年行业融资累计净买入趋势，自选股详情、新闻、公告、评级、资金流、社区热帖 |
 | 大宗 | `/commodities` | 现货、期货、升贴水、库存和跨市场价差 |
 | 能源 | `/energy` | 国家统计局口径的煤炭、天然气、电力等能源生产指标 |
 | 消费 | `/consumption` | 社零、线上线下消费、汽车、地产相关消费和进口需求观察 |
@@ -50,6 +51,7 @@ flowchart LR
 | `src/app.py` | FastAPI 应用入口，注册 API、页面路由和静态资源 |
 | `src/background_refresh.py` | 管理后台刷新任务、刷新状态、超时和启动预热 |
 | `src/news_service.py` | 新闻抓取、分类、摘要、翻译清洗、Markdown 渲染 |
+| `src/ai_service.py` | AI 新闻近 7 天抓取、中文翻译与去重，GitHub AI 生产力项目分类、每类 Stars Top 30、中文注释及 SQLite 单行快照 |
 | `src/stock_service.py` | A股、港股、美股市场概览、成交额、估值、融资和历史缓存 |
 | `src/watchlist_service.py` | 自选股导入、报价、公司详情、新闻、公告、评级、资金流 |
 | `src/commodity_service.py` | 大宗商品期货、现货、库存、升贴水和价差 |
@@ -57,7 +59,7 @@ flowchart LR
 | `src/consumption_service.py` | 消费、社零、汽车、地产相关消费指标 |
 | `src/macro_service.py` | 宏观指标、预测、历史和国家分组 |
 | `src/game_service.py` | 游戏流水、本地导入、GACHAREVENUE 兜底、榜单结构 |
-| `src/xueqiu_service.py` | 雪球大V导入、今日动态抓取、Cookie/浏览器兜底 |
+| `src/xueqiu_service.py` | 雪球大V导入、近7天动态抓取、Cookie/浏览器兜底 |
 
 ### 前端结构
 
@@ -190,16 +192,8 @@ sudo apt install python3.14-venv
 | `VENV_DIR` | `.venv` | Python 虚拟环境目录 |
 | `SKIP_FRONTEND_BUILD` | `0` | `start.sh` 中设为 `1` 可跳过前端构建 |
 | `VITE_API_TARGET` | `http://127.0.0.1:5173` | Vite 开发代理的后端目标 |
+| `GITHUB_TOKEN` | 空 | 可选；提高 GitHub Search API 配额，未设置时使用公开匿名额度 |
 | `SENSORTOWER_AUTH_TOKEN` | 空 | Sensor Tower 接口 Token，配置项位于 `config/sources.json` |
-| `XUEQIU_COOKIE` | 空 | 雪球登录态 Cookie，可提高雪球接口成功率 |
-| `XUEQIU_COOKIE_FILE` | `config/xueqiu_cookie.txt` | 从文件读取雪球登录态 Cookie，适合本地长期保存 |
-| `XUEQIU_BROWSER` | `1` | 雪球接口失败时是否启用 Playwright 浏览器兜底，设为 `0` 关闭 |
-| `XUEQIU_BROWSER_HEADLESS` | `1` | 设为 `0` 可打开有界面浏览器，手动完成登录或验证 |
-| `XUEQIU_BROWSER_PROFILE_DIR` | `data/xueqiu-browser-profile` | 雪球浏览器会话目录 |
-| `XUEQIU_BROWSER_EXECUTABLE` | 空 | 指定本机 Chrome/Chromium 可执行文件 |
-| `XUEQIU_BROWSER_LIBRARY_PATH` | `data/playwright-libs/usr/lib/x86_64-linux-gnu` | Chromium 运行库目录 |
-| `XUEQIU_BROWSER_TIMEOUT_MS` | `18000` | 雪球浏览器兜底请求超时 |
-| `XUEQIU_BROWSER_LOCK_TIMEOUT_MS` | `XUEQIU_BROWSER_TIMEOUT_MS + 5000` | 多个刷新任务共用同一个浏览器 profile 时的等待时间 |
 
 ## 配置说明
 
@@ -242,35 +236,36 @@ config/stock_watchlist.json
 data/stock_watch_details.json
 ```
 
-### 雪球大V
+### Xueqiu Influencers
 
-雪球大V列表保存在：
+Influencer list:
 
 ```text
 config/xueqiu_influencers.json
 ```
 
-页面支持导入雪球主页链接、数字用户 ID 或昵称。若雪球公开接口返回风控页，可以设置 Cookie：
+Xueqiu fetch settings are stored in a local config file and survive service restarts:
 
-```bash
-export XUEQIU_COOKIE='xq_a_token=...; u=...'
+```text
+config/xueqiu_settings.json
 ```
 
-也可以把同样的 Cookie 字符串放进 `config/xueqiu_cookie.txt`，或通过 `XUEQIU_COOKIE_FILE=/path/to/cookie.txt` 指向其他文件。
+Common fields:
 
-也可以启用有界面浏览器手动登录一次：
+- `auth.cookie`: paste the Xueqiu Cookie string directly.
+- `auth.cookieFile`: read Cookie from a file, default `config/xueqiu_cookie.txt`.
+- `browser.enabled`: enable Playwright fallback when public API is blocked.
+- `browser.headless`: set to `false` to open an interactive browser for login or slider verification.
+- `browser.profileDir`: browser session directory, default `data/xueqiu-browser-profile`.
+- `browser.timeoutMs` / `browser.interactiveWaitSeconds`: request timeout and manual verification wait time.
 
-```bash
-XUEQIU_BROWSER_HEADLESS=0 ./start-dev.sh
-```
-
-第一次使用 Playwright 兜底时需要安装 Chromium：
+Install Chromium before the first Playwright fallback run:
 
 ```bash
 python -m playwright install chromium
 ```
 
-Ubuntu 26.04 如遇到 Playwright 暂无匹配构建，可使用兼容平台下载：
+On Ubuntu 26.04, if Playwright has no matching build, install with the compatible platform override:
 
 ```bash
 PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 python -m playwright install chromium
@@ -307,6 +302,12 @@ data/game_metrics.csv.example
 
 导入文件支持 `game_zh` 或 `中文名` 字段，前端会优先展示中文名，并在副标题保留英文名。
 
+### 七麦和点点手动登录
+
+游戏页面点击“打开微信登录窗口”后，会弹出该来源的独立官方登录窗口。请直接在窗口内完成微信扫码登录；后台检测到登录成功后会保存该来源专用的本地浏览器会话并关闭窗口。登录账号、密码和验证码不会经过看板页面。
+
+榜单采集仍在隐藏窗口中串行执行，并保留 30 分钟限频以及验证码、HTTP 403/429 立即停止的保护策略。
+
 ## 数据缓存
 
 后端使用三层缓存策略：
@@ -320,6 +321,8 @@ data/game_metrics.csv.example
 | 表 | 内容 |
 | --- | --- |
 | `latest_news` | 新闻最新快照 |
+| `latest_ai_news` | 最近 7 天 AI 新闻单行快照，固定覆盖 `id=1` |
+| `latest_ai_projects` | GitHub AI 生产力项目 5 类 × Stars Top 30 单行快照，固定覆盖 `id=1` |
 | `latest_stocks` | 市场流动性与估值快照 |
 | `stock_market_history` | 市场成交额、估值等历史辅助缓存 |
 | `stock_turnover_history_cache` | 股票市场成交额历史缓存 |
@@ -344,6 +347,8 @@ data/news.sqlite
 | --- | --- | --- |
 | `GET` | `/api/health` | 健康检查 |
 | `GET` | `/api/news` | 新闻数据，支持 `?refresh=true` |
+| `GET` | `/api/ai-news` | 最近 7 天 AI 新闻，按大模型、公司股票、国家安全等分类 |
+| `GET` | `/api/ai-projects` | GitHub AI 生产力项目，5 类且每类按 Stars 取前 30；智能体不限于编程用途 |
 | `GET` | `/api/stocks` | 股票市场概览 |
 | `GET` | `/api/commodities` | 大宗商品数据 |
 | `GET` | `/api/energy` | 能源数据 |
@@ -363,7 +368,7 @@ data/news.sqlite
 `kind` 可取：
 
 ```text
-news, stocks, commodities, energy, consumption, macro, games, xueqiu
+news, ai-news, ai-projects, stocks, commodities, energy, consumption, macro, games, xueqiu
 ```
 
 ### 自选股
@@ -406,7 +411,7 @@ VITE_API_TARGET=http://127.0.0.1:5173 npm run dev -- --host 0.0.0.0 --port 5174
 
 ### 雪球提示风控或返回 HTML
 
-优先设置 `XUEQIU_COOKIE`，或把 Cookie 放到 `config/xueqiu_cookie.txt`。如果没有 Cookie，用 `XUEQIU_BROWSER_HEADLESS=0` 启动一次，手动完成登录或验证，后续会复用 `data/xueqiu-browser-profile`。
+Use `config/xueqiu_settings.json` for persistent Xueqiu auth and browser fallback settings. Put Cookie in `auth.cookie`, or keep it in `config/xueqiu_cookie.txt` and point `auth.cookieFile` to that path. If Xueqiu asks for slider verification, set `browser.headless` to `false`, restart the service, complete verification in the opened browser, then refresh the page again.
 
 ### 数据没有立即更新
 

@@ -1,0 +1,16 @@
+2026/06/25-23:03:19.587 16d4 Reusing MANIFEST /home/rootlulu/projects/news-digest-web/data/xueqiu-auth-profile/Default/Local Storage/leveldb/MANIFEST-000001
+2026/06/25-23:03:19.741 16d4 Recovering log #8
+2026/06/25-23:03:19.746 16d4 Level-0 table #11: started
+2026/06/25-23:03:19.845 16d4 Level-0 table #11: 37129 bytes OK
+2026/06/25-23:03:19.931 16d4 Delete type=0 #8
+2026/06/25-23:03:19.940 16d6 Compacting 4@0 + 0@1 files
+2026/06/25-23:03:20.014 16d6 Generated table #13@0: 13 keys, 37440 bytes
+2026/06/25-23:03:20.014 16d6 Compacted 4@0 + 0@1 files => 37440 bytes
+2026/06/25-23:03:20.049 16d6 compacted to: files[ 0 1 0 0 0 0 0 ]
+2026/06/25-23:03:20.058 16d6 Delete type=2 #11
+2026/06/25-23:03:20.059 16d6 Delete type=2 #3
+2026/06/25-23:03:20.059 16d6 Delete type=2 #6
+2026/06/25-23:03:20.059 16d6 Delete type=2 #9
+2026/06/25-23:04:19.976 16d6 Level-0 table #15: started
+2026/06/25-23:04:20.075 16d6 Level-0 table #15: 36811 bytes OK
+2026/06/25-23:04:20.165 16d6 Delete type=0 #12

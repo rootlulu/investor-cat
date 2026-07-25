@@ -21,12 +21,13 @@ CACHE_LOCK = asyncio.Lock()
 DB_LOCK = asyncio.Lock()
 CACHE: dict[str, Any] = {"expires_at": datetime.min.replace(tzinfo=UTC), "data": None}
 BEIJING_TZ = timezone(timedelta(hours=8))
-NEWS_SCHEMA_VERSION = 20
+NEWS_SCHEMA_VERSION = 21
 NEWS_RETENTION_DAYS = 7
 TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 TRANSLATE_DOMAIN = "translate.googleapis.com"
 TRANSLATE_BATCH_SIZE = 12
 STRICT_TRANSLATE_PER_SECTION = 12
+TRANSLATE_RETRIES = 3
 ALLOWED_TITLE_ENGLISH = {
     "AI",
     "OPENAI",
@@ -65,6 +66,64 @@ ALLOWED_TITLE_ENGLISH = {
     "ELEVENLABS",
 }
 ENGLISH_RESIDUE_RE = re.compile(r"[A-Za-z]{3,}")
+COMMON_ENGLISH_TITLE_WORDS = {
+    "about",
+    "after",
+    "again",
+    "against",
+    "ahead",
+    "alleged",
+    "amid",
+    "among",
+    "around",
+    "asks",
+    "based",
+    "before",
+    "behind",
+    "between",
+    "billion",
+    "buys",
+    "chair",
+    "could",
+    "cuts",
+    "developing",
+    "finally",
+    "from",
+    "grand",
+    "help",
+    "indicts",
+    "into",
+    "joins",
+    "jury",
+    "limited",
+    "long",
+    "loom",
+    "management",
+    "markets",
+    "million",
+    "minutes",
+    "morning",
+    "over",
+    "path",
+    "plans",
+    "plot",
+    "public",
+    "raise",
+    "raises",
+    "remain",
+    "reports",
+    "reserve",
+    "says",
+    "sale",
+    "share",
+    "shares",
+    "sources",
+    "trust",
+    "under",
+    "with",
+    "warns",
+    "would",
+}
 LOW_VALUE_TITLE_RE = re.compile(
     r"^(stocks|commodities|sector & industry performance|joe weisenthal|tracy alloway)$",
     re.I,
@@ -78,7 +137,7 @@ GENERIC_TITLES = {
     "香港市场与政策消息出现变化",
     "国际要闻出现新变化",
     "全球市场走势出现变化",
-    "能源市场出现新变化",
+    "大宗能源出现新变化",
     "中东局势继续影响市场",
     "俄乌局势出现新进展",
     "AI与芯片产业消息影响市场",
@@ -997,7 +1056,7 @@ async def translate_titles(
             batch_result = {}
         for title in batch:
             translated_value = batch_result.get(title, "")
-            if looks_bad_translation(translated_value):
+            if looks_bad_translation(translated_value, title):
                 translated_value = await translate_one_title(title, client, request_state)
             translated[title] = translated_value
 
@@ -1007,7 +1066,7 @@ async def translate_titles(
         try:
             batch_result = await translate_batch(batch, client, request_state)
             for title in batch:
-                if looks_bad_translation(batch_result.get(title, "")):
+                if looks_bad_translation(batch_result.get(title, ""), title):
                     batch_result[title] = await translate_one_title(title, client, request_state)
             translated.update(batch_result)
         except Exception:
@@ -1022,14 +1081,15 @@ async def translate_one_title(
     client: httpx.AsyncClient,
     request_state: RequestState,
 ) -> str:
-    for attempt in range(1):
+    for attempt in range(TRANSLATE_RETRIES):
         try:
             translated = (await translate_batch([title], client, request_state)).get(title, "")
-            if translated and not looks_bad_translation(translated):
+            if translated and not looks_bad_translation(translated, title):
                 return translated
         except Exception:
             pass
-        await asyncio.sleep(0.4 + random.uniform(0.1, 0.4))
+        if attempt + 1 < TRANSLATE_RETRIES:
+            await asyncio.sleep((0.5 * (2**attempt)) + random.uniform(0.1, 0.4))
     return ""
 
 
@@ -1082,26 +1142,41 @@ def normalize_translated_title(value: str) -> str:
     value = clean_text(value)
     value = value.replace("，消息人士称", "")
     value = value.replace(" - 路透社", "").replace(" - 彭博社", "")
-    value = re.sub(r"\s+", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    value = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fffA-Za-z0-9])", "", value)
+    value = re.sub(r"(?<=[A-Za-z0-9])\s+(?=[\u4e00-\u9fff])", "", value)
     value = value.replace("特朗普", "特朗普")
     return value.strip(" -—:：")
 
 
-def looks_bad_translation(value: str) -> bool:
+def looks_bad_translation(value: str, original_title: str = "") -> bool:
     if not value or not has_chinese(value):
         return True
     if is_generic_title(value):
         return True
-    if english_residue_words(value):
+    if english_residue_words(value, original_title):
         return True
     return bool(re.search(r"\b(after|with|over|sources|says|amid|loom|help|cuts|warns|based)\b", value, re.I))
 
 
-def english_residue_words(value: str) -> list[str]:
+def english_residue_words(value: str, original_title: str = "") -> list[str]:
+    # Translation providers intentionally preserve company, product, and person names.
+    # Treat those original proper nouns as valid while still rejecting untranslated prose.
+    original_proper_nouns = {
+        word.lower()
+        for word in ENGLISH_RESIDUE_RE.findall(original_title)
+        if (
+            word.isupper()
+            or any(char.isupper() for char in word[1:])
+            or (word[:1].isupper() and word.lower() not in COMMON_ENGLISH_TITLE_WORDS)
+        )
+    }
     bad_words = []
     for word in ENGLISH_RESIDUE_RE.findall(value):
         normalized = re.sub(r"[^A-Z0-9]", "", word.upper())
         if normalized in ALLOWED_TITLE_ENGLISH:
+            continue
+        if word.lower() in original_proper_nouns:
             continue
         bad_words.append(word)
     return bad_words
@@ -1125,7 +1200,7 @@ def is_generic_title(value: str) -> bool:
         "香港市场与政策消息",
         "国际要闻",
         "全球市场走势",
-        "能源市场",
+        "大宗能源",
         "贸易政策变化",
         "制裁与限制措施",
         "AI与芯片产业消息",
@@ -1217,7 +1292,7 @@ def fallback_chinese_title(title: str) -> str:
 
 def safe_chinese_title(original_title: str, candidate_title: str | None, section: str) -> str:
     candidate = repair_translated_title(original_title, clean_text(candidate_title or ""))
-    if candidate and not looks_bad_translation(candidate):
+    if candidate and not looks_bad_translation(candidate, original_title):
         return limit_text(candidate, 46)
 
     return limit_text(clean_text(original_title or candidate), 90)
@@ -1232,11 +1307,11 @@ def generic_chinese_title(title: str) -> str:
     if any(term in lower for term in ["tariff", "trade", "export"]):
         return "贸易政策变化牵动市场"
     if any(term in lower for term in ["oil", "crude", "opec", "energy"]):
-        return "能源市场出现新变化"
+        return "大宗能源出现新变化"
     if any(term in lower for term in ["coal"]):
         return "煤炭需求和能源结构变化受关注"
     if re.search(r"\b(fed|rate|rates|inflation)\b", lower):
-        return "利率通胀消息影响市场"
+        return "宏观与流动性消息影响市场"
     if re.search(r"\b(ai|nvidia)\b|artificial intelligence|chip|semiconductor", lower):
         return "AI与芯片产业消息影响市场"
     if any(term in lower for term in ["ukraine", "russia"]):
@@ -1257,10 +1332,14 @@ def enrich_item(item: dict[str, Any], translated_title: str | None = None) -> di
     original_title = item.get("title", "")
     chinese_title = safe_chinese_title(original_title, translated_title, section)
     translation_ok = title_translation_succeeded(original_title, chinese_title)
+    topic = infer_topic(original_title, section)
+    subject = infer_subject(original_title, section)
     enriched = dict(item)
     enriched.pop("_candidateSection", None)
     enriched.pop("_querySection", None)
     enriched["section"] = section
+    enriched["topic"] = topic
+    enriched["subject"] = subject
     enriched["originalTitle"] = original_title
     enriched["title"] = limit_text(chinese_title, 46)
     enriched["translationStatus"] = "translated" if translation_ok else "original"
@@ -1351,6 +1430,8 @@ def ensure_detail_fields(data: dict[str, Any]) -> dict[str, Any]:
         for item in data.get(section, []):
             original_title = item.get("originalTitle") or item.get("title", "")
             translated_title = item.get("title", "")
+            item["topic"] = infer_topic(original_title, section)
+            item["subject"] = infer_subject(original_title, section)
             repaired_title = safe_chinese_title(original_title, translated_title, section)
             translation_ok = title_translation_succeeded(original_title, repaired_title)
             repaired = repaired_title != translated_title
@@ -1395,45 +1476,353 @@ def title_translation_succeeded(original_title: str, display_title: str) -> bool
         return True
     if display == original:
         return False
-    return has_chinese(display) and not looks_bad_translation(display)
+    return has_chinese(display) and not looks_bad_translation(display, original)
+
+
+INVESTMENT_TOPIC_RULES: list[tuple[str, list[str]]] = [
+    (
+        "宏观与流动性",
+        [
+            "fed",
+            "federal reserve",
+            "central bank",
+            "rate",
+            "inflation",
+            "cpi",
+            "ppi",
+            "gdp",
+            "pmi",
+            "jobs",
+            "employment",
+            "unemployment",
+            "productivity",
+            "monetary",
+            "fiscal",
+            "美联储",
+            "央行",
+            "利率",
+            "通胀",
+            "财政",
+            "就业",
+            "失业",
+            "经济增长",
+        ],
+    ),
+    (
+        "利率与信用",
+        [
+            "treasury",
+            "yield",
+            "bond",
+            "credit",
+            "spread",
+            "default",
+            "debt",
+            "loan",
+            "mortgage",
+            "美债",
+            "国债",
+            "收益率",
+            "信用",
+            "利差",
+            "债务",
+            "违约",
+            "贷款",
+        ],
+    ),
+    (
+        "大宗能源",
+        [
+            "oil",
+            "crude",
+            "opec",
+            "natural gas",
+            "lng",
+            "coal",
+            "diesel",
+            "gasoline",
+            "fuel",
+            "refinery",
+            "power",
+            "electricity",
+            "utility",
+            "原油",
+            "石油",
+            "油价",
+            "天然气",
+            "液化天然气",
+            "煤炭",
+            "燃料",
+            "炼油",
+            "电力",
+            "发电",
+            "能源",
+        ],
+    ),
+    (
+        "大宗商品",
+        [
+            "commodity",
+            "commodities",
+            "copper",
+            "aluminum",
+            "aluminium",
+            "iron ore",
+            "gold",
+            "silver",
+            "nickel",
+            "zinc",
+            "tin",
+            "steel",
+            "metal",
+            "grain",
+            "corn",
+            "soybean",
+            "wheat",
+            "sugar",
+            "cotton",
+            "fertilizer",
+            "lithium",
+            "铜",
+            "铝",
+            "铁矿",
+            "黄金",
+            "白银",
+            "镍",
+            "锌",
+            "锡",
+            "钢",
+            "有色",
+            "金属",
+            "粮食",
+            "农产品",
+            "化肥",
+            "锂",
+            "碳酸锂",
+        ],
+    ),
+    (
+        "科技产业",
+        [
+            "ai",
+            "artificial intelligence",
+            "nvidia",
+            "chip",
+            "semiconductor",
+            "software",
+            "cloud",
+            "data center",
+            "tech",
+            "芯片",
+            "半导体",
+            "人工智能",
+            "英伟达",
+            "算力",
+            "数据中心",
+            "科技",
+        ],
+    ),
+    (
+        "外汇与跨境资金",
+        [
+            "dollar",
+            "yuan",
+            "renminbi",
+            "yen",
+            "euro",
+            "fx",
+            "currency",
+            "capital flow",
+            "美元",
+            "人民币",
+            "日元",
+            "欧元",
+            "汇率",
+            "外汇",
+            "跨境资金",
+            "资金流",
+        ],
+    ),
+    (
+        "中国资产",
+        [
+            "china",
+            "chinese",
+            "beijing",
+            "shanghai",
+            "shenzhen",
+            "hong kong",
+            "taiwan",
+            "pboc",
+            "tencent",
+            "alibaba",
+            "byd",
+            "huawei",
+            "中国",
+            "内地",
+            "香港",
+            "台湾",
+            "人民币",
+            "央行",
+            "港股",
+            "A股",
+            "腾讯",
+            "阿里",
+            "比亚迪",
+            "华为",
+        ],
+    ),
+    (
+        "权益市场",
+        [
+            "stock",
+            "share",
+            "equity",
+            "earnings",
+            "nasdaq",
+            "s&p",
+            "dow",
+            "ipo",
+            "bank",
+            "股票",
+            "股市",
+            "美股",
+            "港股",
+            "财报",
+            "估值",
+            "银行",
+        ],
+    ),
+    (
+        "消费与地产",
+        [
+            "consumer",
+            "retail",
+            "property",
+            "real estate",
+            "housing",
+            "home sales",
+            "消费",
+            "零售",
+            "地产",
+            "房地产",
+            "住房",
+            "房价",
+        ],
+    ),
+    (
+        "地缘与供应链",
+        [
+            "tariff",
+            "trade",
+            "sanction",
+            "export control",
+            "supply chain",
+            "war",
+            "ukraine",
+            "russia",
+            "israel",
+            "iran",
+            "gaza",
+            "nato",
+            "关税",
+            "贸易",
+            "制裁",
+            "出口管制",
+            "供应链",
+            "战争",
+            "冲突",
+            "乌克兰",
+            "俄罗斯",
+            "以色列",
+            "伊朗",
+            "中东",
+        ],
+    ),
+]
+
+
+def text_has_any(text: str, terms: list[str]) -> bool:
+    return any(str(term).lower() in text for term in terms)
 
 
 def pick_topic(text: str, terms: list[str], label: str) -> str:
-    return label if any(term in text for term in terms) else ""
+    return label if text_has_any(text, terms) else ""
 
 
 def infer_topic(title: str, section: str) -> str:
     lower = title.lower()
-    return (
-        pick_topic(lower, HONG_KONG_TERMS, "港澳新闻")
-        or pick_topic(lower, ["china", "chinese", "beijing"], "中国新闻")
-        or pick_topic(lower, ["fed", "rate", "inflation"], "利率通胀")
-        or pick_topic(lower, ["oil", "opec", "fuel", "energy"], "能源市场")
-        or pick_topic(lower, ["ai", "chip", "nvidia", "tech"], "科技产业")
-        or pick_topic(lower, ["stock", "share", "bank", "market"], "金融市场")
-        or pick_topic(lower, ["war", "ukraine", "russia", "israel", "iran"], "地缘冲突")
-        or ("中国及港澳新闻" if section == "china" else "国际要闻")
+    geopolitical_topic = pick_topic(
+        lower,
+        [
+            "tariff",
+            "trade",
+            "sanction",
+            "export control",
+            "supply chain",
+            "war",
+            "ukraine",
+            "russia",
+            "israel",
+            "iran",
+            "gaza",
+            "nato",
+            "关税",
+            "贸易",
+            "制裁",
+            "出口管制",
+            "供应链",
+            "战争",
+            "冲突",
+            "乌克兰",
+            "俄罗斯",
+            "以色列",
+            "伊朗",
+            "中东",
+        ],
+        "地缘与供应链",
     )
+    if geopolitical_topic:
+        return geopolitical_topic
+    for label, terms in INVESTMENT_TOPIC_RULES:
+        if text_has_any(lower, terms):
+            return label
+    return "中国资产" if section == "china" else "国际要闻"
 
 
 def infer_subject(title: str, section: str) -> str:
     lower = title.lower()
+    priority_subjects = [
+        (["tariff", "trade", "sanction", "关税", "贸易", "制裁"], "贸易与制裁"),
+        (["ukraine", "russia"], "俄乌局势"),
+        (["israel", "iran"], "中东局势"),
+    ]
+    for keywords, subject in priority_subjects:
+        if text_has_any(lower, keywords):
+            return subject
+
     subjects = [
-        (HONG_KONG_TERMS, "香港相关消息"),
+        (HONG_KONG_TERMS, "港澳市场"),
         (["tencent"], "腾讯"),
         (["alibaba"], "阿里巴巴"),
         (["baidu"], "百度"),
         (["byd"], "比亚迪"),
         (["huawei"], "华为"),
-        (["china", "chinese", "beijing"], "中国相关事件"),
+        (["treasury", "yield", "bond", "美债", "国债", "收益率"], "债券利率"),
         (["fed", "federal reserve"], "美联储政策"),
-        (["oil", "opec", "fuel"], "能源市场"),
-        (["stock", "share", "market"], "金融市场"),
+        (["oil", "opec", "crude", "原油", "石油", "油价"], "油气价格"),
+        (["coal", "煤炭"], "煤炭供需"),
+        (["power", "electricity", "电力", "发电"], "电力结构"),
+        (["copper", "aluminum", "iron ore", "gold", "铜", "铝", "铁矿", "黄金"], "商品价格"),
+        (["ai", "chip", "nvidia", "semiconductor", "芯片", "AI", "半导体"], "AI芯片链"),
+        (["china", "chinese", "beijing", "中国", "内地"], "中国相关事件"),
+        (["stock", "share", "equity", "earnings", "股票", "股市", "财报"], "权益市场"),
+        (["tariff", "trade", "sanction", "关税", "贸易", "制裁"], "贸易与制裁"),
         (["ukraine", "russia"], "俄乌局势"),
         (["israel", "iran"], "中东局势"),
     ]
     for keywords, subject in subjects:
-        if any(keyword in lower for keyword in keywords):
+        if text_has_any(lower, keywords):
             return subject
     return "这条新闻" if section == "world" else "中国及港澳相关消息"
 
