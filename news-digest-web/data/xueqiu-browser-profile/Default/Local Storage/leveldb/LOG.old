@@ -1,6 +1,0 @@
-2026/06/25-22:35:44.348 9c9 Reusing MANIFEST /home/rootlulu/projects/news-digest-web/data/xueqiu-browser-profile/Default/Local Storage/leveldb/MANIFEST-000001
-2026/06/25-22:35:44.381 9c9 Recovering log #30
-2026/06/25-22:35:44.382 9c9 Reusing old log /home/rootlulu/projects/news-digest-web/data/xueqiu-browser-profile/Default/Local Storage/leveldb/000030.log 
-2026/06/25-22:36:44.395 9cc Level-0 table #34: started
-2026/06/25-22:36:44.417 9cc Level-0 table #34: 37257 bytes OK
-2026/06/25-22:36:44.424 9cc Delete type=0 #30

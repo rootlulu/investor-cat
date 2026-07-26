@@ -1,6 +1,0 @@
-2026/06/25-23:05:43.491 17c5 Reusing MANIFEST /home/rootlulu/projects/news-digest-web/data/xueqiu-auth-profile/Default/Local Storage/leveldb/MANIFEST-000001
-2026/06/25-23:05:43.531 17c5 Recovering log #14
-2026/06/25-23:05:43.558 17c5 Reusing old log /home/rootlulu/projects/news-digest-web/data/xueqiu-auth-profile/Default/Local Storage/leveldb/000014.log 
-2026/06/25-23:06:43.577 17e4 Level-0 table #18: started
-2026/06/25-23:06:43.583 17e4 Level-0 table #18: 37091 bytes OK
-2026/06/25-23:06:43.586 17e4 Delete type=0 #14
