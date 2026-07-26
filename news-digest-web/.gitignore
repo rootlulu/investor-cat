@@ -54,6 +54,7 @@ config/stock_watchlist.json
 config/xueqiu_influencers.json
 config/xueqiu_cookie.txt
 config/xueqiu_settings.json
+config/browser_settings.json
 
 # Environment and secrets
 .env
