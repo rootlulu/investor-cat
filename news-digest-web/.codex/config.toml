@@ -1,0 +1,17 @@
+[mcp_servers.xueqiu_research]
+command = "wsl.exe"
+args = ["-d", "Ubuntu-26.04", "--cd", "/home/rootlulu/projects/news-digest-web", ".venv-mcp/bin/python", "-m", "src.xueqiu_mcp_server"]
+env = { NEWS_DIGEST_BASE_URL = "http://127.0.0.1:5173", PYTHONDONTWRITEBYTECODE = "1" }
+enabled_tools = [
+  "list_influencers",
+  "get_corpus_status",
+  "start_influencer_crawl",
+  "get_crawl_status",
+  "cancel_crawl",
+  "search_xueqiu_evidence",
+  "read_xueqiu_evidence",
+  "get_xueqiu_media",
+]
+default_tools_approval_mode = "writes"
+startup_timeout_sec = 20
+tool_timeout_sec = 120
