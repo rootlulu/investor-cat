@@ -3,8 +3,9 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 
 const AUTO_REFRESH_MS = 30 * 60 * 1000;
 const STATUS_POLL_MS = 3 * 1000;
-const INITIAL_VISIBLE = 50;
-const LOAD_MORE_SIZE = 25;
+const INITIAL_VISIBLE = 12;
+const LOAD_MORE_SIZE = 12;
+const AI_INITIAL_VISIBLE = 24;
 const BEIJING_TIME_ZONE = "Asia/Shanghai";
 const BEIJING_TIME_OFFSET = "+08:00";
 const AI_NEWS_TABS = [
@@ -22,6 +23,30 @@ const AI_PROJECT_TABS = [
   { id: "mcp", label: "MCP 工具", description: "连接文件、数据库、浏览器与外部服务的 MCP Server、SDK 和目录。" },
   { id: "agent-frameworks", label: "Agent 框架", description: "Deep Agents 一类用于规划、编排、记忆和运行 Agent 的开发框架。" },
   { id: "dev-workflows", label: "开发工作流", description: "上下文工程、代码审查、规范驱动开发、记忆和提示词等效率工具。" }
+];
+const PAGE_GROUPS = [
+  {
+    label: "情报",
+    pages: [
+      { page: "news", href: "/news", icon: Newspaper, label: "资讯" },
+      { page: "ai", href: "/ai", icon: BrainCircuit, label: "AI" },
+      { page: "xueqiu", href: "/xueqiu", icon: Snowflake, label: "雪球" }
+    ]
+  },
+  {
+    label: "市场",
+    pages: [
+      { page: "stocks", href: "/stocks", icon: LineChart, label: "股票" },
+      { page: "commodities", href: "/commodities", icon: Boxes, label: "大宗" },
+      { page: "energy", href: "/energy", icon: Zap, label: "能源" },
+      { page: "consumption", href: "/consumption", icon: ShoppingBag, label: "消费" },
+      { page: "macro", href: "/macro", icon: Landmark, label: "宏观" }
+    ]
+  },
+  {
+    label: "行业",
+    pages: [{ page: "games", href: "/games", icon: Gamepad2, label: "游戏" }]
+  }
 ];
 const COMMODITY_SECTOR_ORDER = ["贵金属", "有色金属", "黑色链", "大宗能源", "化工品", "建材", "化肥", "新能源材料", "农产品", "其他"];
 const COMMODITY_SECTOR_RANK = new Map(COMMODITY_SECTOR_ORDER.map((sector, index) => [sector, index]));
@@ -99,32 +124,57 @@ function PageShell({ eyebrow, title, activePage, actions, status, children }) {
   return (
     <main className={`shell shell-${activePage}`}>
       <header className="topbar">
-        <div className="topbar-main">
-          <p className="eyebrow">{eyebrow}</p>
-          <h1>{title}</h1>
-          <nav className="page-nav" aria-label="页面导航">
-            <NavLink activePage={activePage} page="news" href="/news" icon={<Newspaper size={16} />} label="资讯" />
-            <NavLink activePage={activePage} page="ai" href="/ai" icon={<BrainCircuit size={16} />} label="AI" />
-            <NavLink activePage={activePage} page="stocks" href="/stocks" icon={<LineChart size={16} />} label="股票" />
-            <NavLink activePage={activePage} page="commodities" href="/commodities" icon={<Boxes size={16} />} label="大宗" />
-            <NavLink activePage={activePage} page="energy" href="/energy" icon={<Zap size={16} />} label="能源" />
-            <NavLink activePage={activePage} page="consumption" href="/consumption" icon={<ShoppingBag size={16} />} label="消费" />
-            <NavLink activePage={activePage} page="macro" href="/macro" icon={<Landmark size={16} />} label="宏观" />
-            <NavLink activePage={activePage} page="games" href="/games" icon={<Gamepad2 size={16} />} label="游戏" />
-            <NavLink activePage={activePage} page="xueqiu" href="/xueqiu" icon={<Snowflake size={16} />} label="雪球" />
-          </nav>
+        <div className="topbar-heading">
+          <div className="topbar-main">
+            <p className="eyebrow">{eyebrow}</p>
+            <h1>{title}</h1>
+          </div>
+          <div className="actions">{actions}</div>
         </div>
-        <div className="actions">{actions}</div>
+        <nav className="page-nav" aria-label="页面导航">
+          {PAGE_GROUPS.map((group) => (
+            <span className="page-nav-group" role="group" aria-label={group.label} key={group.label}>
+              <span className="page-nav-group-label" aria-hidden="true">{group.label}</span>
+              {group.pages.map(({ page, href, icon: Icon, label }) => (
+                <NavLink key={page} activePage={activePage} page={page} href={href} icon={<Icon size={16} />} label={label} />
+              ))}
+            </span>
+          ))}
+        </nav>
       </header>
 
-      <section className="status" role="status">
-        {status}
-      </section>
+      <DataStatus status={status} />
 
       {children}
 
       <BackToTopButton />
     </main>
+  );
+}
+
+function DataStatus({ status }) {
+  const text = String(status || "暂无更新状态");
+  const segments = text.split("；").map((segment) => segment.trim()).filter(Boolean);
+  const problem = segments.find((segment) => /失败|异常|错误/.test(segment));
+  const summarySegments = [segments[0], problem || segments[1]].filter(Boolean);
+  const summary = [...new Set(summarySegments)].join(" · ");
+  const hasDetails = segments.length > summarySegments.length;
+  const failed = /失败|错误/.test(text) && !/部分/.test(text);
+
+  return (
+    <section className={`status${problem ? " has-warning" : ""}`} role="status">
+      {hasDetails ? (
+        <details open={failed}>
+          <summary>
+            <span>{summary}</span>
+            <span className="status-more">{problem ? "查看异常" : "数据详情"}</span>
+          </summary>
+          <p>{text}</p>
+        </details>
+      ) : (
+        <p>{text}</p>
+      )}
+    </section>
   );
 }
 
@@ -193,6 +243,7 @@ function AiPage() {
   const [refreshingNews, setRefreshingNews] = useState(false);
   const [refreshingProjects, setRefreshingProjects] = useState(false);
   const [newNewsIds, setNewNewsIds] = useState(new Set());
+  const [visibleNewsCount, setVisibleNewsCount] = useState(AI_INITIAL_VISIBLE);
 
   const knownNewsIds = useRef(new Set());
   const lastNewsStatusText = useRef("");
@@ -262,10 +313,13 @@ function AiPage() {
     ...AI_NEWS_TABS.map((tab) => ({ ...tab, count: tab.id === "all" ? newsData.items.length : categoryCounts.get(tab.id) || 0 })),
     { id: "github", label: "GitHub 工具", count: projectsData.projects.length }
   ];
-  const visibleNews = activeTab === "all" ? newsData.items : newsData.items.filter((item) => item.category === activeTab);
+  const filteredNews = activeTab === "all" ? newsData.items : newsData.items.filter((item) => item.category === activeTab);
+  const visibleNews = filteredNews.slice(0, visibleNewsCount);
+  const remainingNewsCount = Math.max(0, filteredNews.length - visibleNews.length);
   const showingProjects = activeTab === "github";
   const selectTab = useCallback((tabId) => {
     setActiveTab(tabId);
+    setVisibleNewsCount(AI_INITIAL_VISIBLE);
     const hash = tabId === "github" && activeProjectCategory !== "all" ? `github/${activeProjectCategory}` : tabId;
     window.history.replaceState(null, "", `${window.location.pathname}#${hash}`);
   }, [activeProjectCategory]);
@@ -322,16 +376,21 @@ function AiPage() {
       ) : (
         <section className="ai-news-panel" role="tabpanel" aria-live="polite">
           <div className="section-title compact">
-            <span>{visibleNews.length}</span>
+            <span>{filteredNews.length}</span>
             <h2>{tabs.find((tab) => tab.id === activeTab)?.label || "AI 新闻"}</h2>
           </div>
           {!visibleNews.length ? (
             <p className="empty">最近一周暂未抓到这个分类的 AI 新闻。</p>
           ) : (
             <div className="ai-news-grid">
-              {visibleNews.map((item) => (
-                <NewsCard key={item.id || newsId(item)} item={item} isNew={newNewsIds.has(item.id || newsId(item))} showOriginalTitle={false} />
+              {visibleNews.map((item, index) => (
+                <NewsCard key={item.id || newsId(item)} item={item} isNew={newNewsIds.has(item.id || newsId(item))} showOriginalTitle={false} compact={index > 1} />
               ))}
+              {remainingNewsCount > 0 && (
+                <button className="load-more-button ai-load-more" type="button" onClick={() => setVisibleNewsCount((count) => count + AI_INITIAL_VISIBLE)}>
+                  继续加载剩余 {remainingNewsCount} 条
+                </button>
+              )}
             </div>
           )}
         </section>
@@ -543,8 +602,8 @@ function NewsColumn({ number, title, items, visibleCount, newIds, newCount, onLo
           <p className="empty">暂未抓到符合条件的新闻。</p>
         ) : (
           <>
-            {visibleItems.map((item) => (
-              <NewsCard key={newsId(item)} item={item} isNew={newIds.has(newsId(item))} />
+            {visibleItems.map((item, index) => (
+              <NewsCard key={newsId(item)} item={item} isNew={newIds.has(newsId(item))} compact={index > 0} />
             ))}
             {remaining > 0 && (
               <button className="load-more-button" type="button" onClick={onLoadMore}>
@@ -558,14 +617,14 @@ function NewsColumn({ number, title, items, visibleCount, newIds, newCount, onLo
   );
 }
 
-function NewsCard({ item, isNew, showOriginalTitle = true }) {
+function NewsCard({ item, isNew, showOriginalTitle = true, compact = false }) {
   const title = item.title || "未命名新闻";
   const originalTitle = showOriginalTitle && item.originalTitle && item.originalTitle !== title ? item.originalTitle : "";
   const topic = item.topic || "";
   const subject = item.subject && item.subject !== topic ? item.subject : "";
 
   return (
-    <article className={`news-card${isNew ? " is-new" : ""}`}>
+    <article className={`news-card${compact ? " is-compact" : " is-featured"}${isNew ? " is-new" : ""}`}>
       <div className="news-title-row">
         {isNew && <span className="news-new-dot" title="新增资讯" aria-label="新增资讯" />}
         <a className="news-title" href={item.url} title={originalTitle || title} target="_blank" rel="noreferrer">
@@ -578,9 +637,21 @@ function NewsCard({ item, isNew, showOriginalTitle = true }) {
           {subject && <span className="news-subject">{subject}</span>}
         </div>
       )}
-      {originalTitle && <p className="original-title">原标题：{originalTitle}</p>}
       {item.summary && <p className="summary">{item.summary}</p>}
-      {item.detail && <p className="detail">{item.detail}</p>}
+      {compact ? (
+        (originalTitle || item.detail) && (
+          <details className="news-card-more">
+            <summary>展开解读</summary>
+            {originalTitle && <p className="original-title">原标题：{originalTitle}</p>}
+            {item.detail && <p className="detail">{item.detail}</p>}
+          </details>
+        )
+      ) : (
+        <>
+          {originalTitle && <p className="original-title">原标题：{originalTitle}</p>}
+          {item.detail && <p className="detail">{item.detail}</p>}
+        </>
+      )}
       <footer>
         <span className="source">{item.source || "公开来源"}</span>
         <time dateTime={item.publishedAt}>{formatTime(item.publishedAt)}</time>
@@ -847,18 +918,36 @@ function StocksPage({ stockId = "" }) {
 
       {stockTab === "market" ? (
         <div id="stock-panel-market" className="stock-tab-panel" role="tabpanel" aria-labelledby="stock-tab-market">
-          <section className="market-grid" aria-live="polite">
-            {!markets.length ? (
-              <p className="empty">暂未取到市场流动性数据。</p>
-            ) : (
-              markets.map((market, index) => {
-                const key = marketKey(market, index);
-                return <MarketCard key={key} market={market} snapshotAt={snapshotAt} isNew={newMarketKeys.has(key)} />;
-              })
-            )}
+          <nav className="section-jump-nav" aria-label="大盘页面分区">
+            <a href="#stock-market">市场概览</a>
+            <a href="#stock-industry">机构与行业融资</a>
+            <a href="#stock-signals">边际信号</a>
+          </nav>
+          <section id="stock-market" className="dashboard-section" aria-labelledby="stock-market-title">
+            <header className="dashboard-section-heading">
+              <div>
+                <p className="market-label">市场概览</p>
+                <h2 id="stock-market-title">全球市场快照</h2>
+              </div>
+              <span>先看流动性、成交与估值位置</span>
+            </header>
+            <div className="market-grid" aria-live="polite">
+              {!markets.length ? (
+                <p className="empty">暂未取到市场流动性数据。</p>
+              ) : (
+                markets.map((market, index) => {
+                  const key = marketKey(market, index);
+                  return <MarketCard key={key} market={market} snapshotAt={snapshotAt} isNew={newMarketKeys.has(key)} />;
+                })
+              )}
+            </div>
           </section>
-          <InstitutionIndustryDashboard allocation={institutionAllocation} financingTrend={industryFinancingTrend} />
-          <MarginalSignalsBoard data={marginalSignals} />
+          <div id="stock-industry" className="dashboard-section-anchor">
+            <InstitutionIndustryDashboard allocation={institutionAllocation} financingTrend={industryFinancingTrend} />
+          </div>
+          <div id="stock-signals" className="dashboard-section-anchor">
+            <MarginalSignalsBoard data={marginalSignals} />
+          </div>
         </div>
       ) : (
         <div id="stock-panel-watchlist" className="stock-tab-panel" role="tabpanel" aria-labelledby="stock-tab-watchlist">
@@ -5411,21 +5500,21 @@ function MacroCountry({ country, newKeys }) {
                     const key = macroItemKey(country, group, item);
                     return (
                       <tr key={key} className={newKeys.has(key) ? "is-new-row" : ""}>
-                        <td>
+                        <td data-label="指标">
                           <strong>{item.name}</strong>
                           <small>{item.category}</small>
                         </td>
-                        <td>
+                        <td data-label="K线">
                           <MacroKline item={item} />
                         </td>
-                        <td className={macroValueClass(item)}>{formatMacroValue(item)}</td>
-                        <td className={`macro-forecast-cell${hasMacroForecast(item) ? "" : " is-empty"}`}>
+                        <td data-label="最新" className={macroValueClass(item)}>{formatMacroValue(item)}</td>
+                        <td data-label="下次预测" className={`macro-forecast-cell${hasMacroForecast(item) ? "" : " is-empty"}`}>
                           <strong>{formatMacroForecast(item)}</strong>
                           <small>{macroForecastDetails(item)}</small>
                         </td>
-                        <td>{formatMacroPrevious(item)}</td>
-                        <td>{item.period || "未知"}</td>
-                        <td>
+                        <td data-label="前值">{formatMacroPrevious(item)}</td>
+                        <td data-label="期数">{item.period || "未知"}</td>
+                        <td data-label="来源/说明">
                           {item.source || "公开来源"}
                           <small>{item.note || ""}</small>
                         </td>
@@ -5446,7 +5535,7 @@ function RefreshButton({ loading, title, onClick }) {
   return (
     <button className={`primary-action${loading ? " is-loading" : ""}`} type="button" title={title} onClick={onClick} disabled={loading} aria-busy={loading}>
       <RefreshCw size={16} aria-hidden="true" />
-      {loading ? "刷新中" : "刷新"}
+      <span>{loading ? "刷新中" : "刷新"}</span>
     </button>
   );
 }

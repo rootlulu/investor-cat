@@ -125,3 +125,45 @@ T13|x|修复 Steam proxy/browser/top-sellers/cache/UI error path + Steam/Sensor 
 id|date|cause|fix
 B2|2026-07-26|runtime route stale + Chromium libs missing + Steam Store direct timeout + DOM no appId + error hidden/source status mixed|V20-V25
 B3|2026-07-26|全量验证误用系统 Python；pytest 测试模块无法导入|改用项目环境或隔离测试依赖；非产品代码缺陷
+
+## §G（前端改版）
+
+G5: `news-digest-web` → 清晰、专业情报看板；数据行为不变。
+
+## §C（前端改版）
+
+C15: 保留 routes、API request/response、刷新、链接、持久化数据。
+C16: 保留 7 天有界 feed + latest snapshot；渐进披露仅影响展示。
+C17: ⊥ 新 runtime dependency。
+C18: 1440px desktop + 390px mobile 可用。
+C19: 中文 UI；semantic HTML；keyboard focus 可见。
+
+## §I（前端改版）
+
+routes: `/news`, `/ai`, `/stocks`, `/commodities`, `/energy`, `/consumption`, `/macro`, `/games`, `/xueqiu`
+entry: `frontend/src/App.jsx`
+styles: `frontend/src/styles.css`
+build: `npm run build`
+tests: `python3 -m unittest discover -s tests -v`
+
+## §V（前端改版）
+
+V26: 390px shell → non-sticky tall header + 单行横向 page nav + ⊥ document overflow。
+V27: mobile actions/tabs/jump links → min 44px target + `:focus-visible`；reduced-motion honored。
+V28: status → 默认 compact；failure/partial anomaly 可见；完整 source/error 可访问。
+V29: news → 每列初始 ≤12 cards；首项强调；其余 compact；load-more 保留 full snapshot。
+V30: AI news → 每 tab 初始 ≤24 cards；load-more 保留 full snapshot。
+V31: stocks 保留大盘/个股 tab；大盘 → market overview → institution/industry → marginal signals；jump nav 暴露层级。
+V32: macro @390px → card rows；7 fields 保留；⊥ horizontal table scroll。
+V33: surfaces/colors → 每页单 accent；red/green 仅 semantic。
+V34: ∀ routes @1440px + representative routes @390px → render；zero console errors；⊥ document overflow。
+V35: `npm run build` + Python unittest → exit 0。
+V36: hrefs、active state、external links、tabs、refresh actions → behavior preserved。
+
+## §T（前端改版）
+
+id|status|task|cites
+T14|x|redesign shell/nav/status/tokens/focus|V26-V28,V33,V36
+T15|x|add progressive disclosure + feed hierarchy|V29,V30
+T16|x|integrate stock hierarchy + macro mobile cards|V31,V32
+T17|x|build/tests/desktop-mobile QA|V34,V35
