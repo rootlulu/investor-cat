@@ -1,5 +1,5 @@
-import { ArrowLeft, ArrowUpToLine, Boxes, BrainCircuit, Check, ExternalLink, FileText, Gamepad2, GitFork, Landmark, LineChart, Newspaper, Pencil, RefreshCw, ShoppingBag, Snowflake, Star, Trash2, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowLeft, ArrowUpToLine, Boxes, BrainCircuit, Check, ExternalLink, FileText, Gamepad2, GitFork, Landmark, LineChart, Maximize2, Newspaper, Pencil, RefreshCw, ShoppingBag, Snowflake, Star, Trash2, X, Zap } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const AUTO_REFRESH_MS = 30 * 60 * 1000;
 const STATUS_POLL_MS = 3 * 1000;
@@ -31,7 +31,16 @@ const INDUSTRY_FINANCING_COLORS = [
   "#5b9bd5", "#ed7d31", "#a5a5a5", "#ffc000", "#4472c4", "#70ad47", "#255e91", "#9e480e",
   "#636363", "#997300", "#264478", "#43682b", "#7cafcb", "#f4b183", "#b7b7b7", "#ffd966",
   "#5b6f9f", "#8fb36b", "#2e75b6", "#c55a11", "#7f8c8d", "#a9a000", "#365f91", "#8064a2",
-  "#9dc3e6", "#f4a261", "#c9c9c9", "#ffd45c", "#8faadc", "#a8c98a"
+  "#9dc3e6", "#f4a261", "#c9c9c9", "#ffd45c", "#8faadc", "#a8c98a", "#2a9d8f"
+];
+const INSTITUTION_CATEGORY_DEFS = [
+  { id: "public_fund", label: "公募基金" },
+  { id: "private_fund", label: "百亿私募" },
+  { id: "national_team", label: "国家队" },
+  { id: "etf", label: "ETF" },
+  { id: "social_security", label: "社保基金" },
+  { id: "insurance", label: "保险资金" },
+  { id: "qfii", label: "QFII" }
 ];
 
 export default function App() {
@@ -63,7 +72,7 @@ export default function App() {
           : activePage === "ai"
             ? "AI 情报"
           : activePage === "stocks"
-            ? "股票市场流动性与估值"
+            ? "股票市场流动性与边际信号"
             : activePage === "commodities"
             ? "大宗商品监控"
             : activePage === "energy"
@@ -161,6 +170,11 @@ function NavLink({ activePage, page, href, icon, label }) {
 function stockIdFromPath(path) {
   const match = /^\/stocks\/([^/?#]+)/.exec(path);
   return match ? decodeURIComponent(match[1]) : "";
+}
+
+function initialStockTab(stockId) {
+  if (stockId) return "watchlist";
+  return new URLSearchParams(window.location.search).get("tab") === "watchlist" ? "watchlist" : "market";
 }
 
 function AiPage() {
@@ -578,6 +592,8 @@ function NewsCard({ item, isNew, showOriginalTitle = true }) {
 function StocksPage({ stockId = "" }) {
   const [markets, setMarkets] = useState([]);
   const [industryFinancingTrend, setIndustryFinancingTrend] = useState(null);
+  const [marginalSignals, setMarginalSignals] = useState({});
+  const [institutionAllocation, setInstitutionAllocation] = useState({});
   const [watchlist, setWatchlist] = useState([]);
   const [newMarketKeys, setNewMarketKeys] = useState(new Set());
   const [snapshotAt, setSnapshotAt] = useState("");
@@ -591,6 +607,7 @@ function StocksPage({ stockId = "" }) {
   const [watchlistBusyId, setWatchlistBusyId] = useState("");
   const [editingStockId, setEditingStockId] = useState("");
   const [editingName, setEditingName] = useState("");
+  const [stockTab, setStockTab] = useState(() => initialStockTab(stockId));
 
   const knownMarketSignatures = useRef(new Map());
   const lastStatusText = useRef("");
@@ -616,6 +633,8 @@ function StocksPage({ stockId = "" }) {
 
       setMarkets(nextMarkets);
       setIndustryFinancingTrend(data.industryFinancingTrend || null);
+      setMarginalSignals(data.marginalSignals || {});
+      setInstitutionAllocation(data.institutionIndustryAllocation || {});
       setWatchlist(nextWatchlist);
       setSelectedStockId((current) => {
         const desired = current || stockId;
@@ -635,12 +654,21 @@ function StocksPage({ stockId = "" }) {
     }
   }, [stockId]);
 
-  const updateStocksPath = useCallback((nextId = "") => {
-    const nextPath = nextId ? `/stocks/${encodeURIComponent(nextId)}` : "/stocks";
-    if (window.location.pathname !== nextPath) {
-      window.history.replaceState(null, "", nextPath);
+  const updateStocksPath = useCallback((nextId = "", nextTab = "market") => {
+    const nextLocation = nextId
+      ? `/stocks/${encodeURIComponent(nextId)}`
+      : nextTab === "watchlist"
+        ? "/stocks?tab=watchlist"
+        : "/stocks";
+    if (`${window.location.pathname}${window.location.search}` !== nextLocation) {
+      window.history.replaceState(null, "", nextLocation);
     }
   }, []);
+
+  const selectStockTab = useCallback((nextTab) => {
+    setStockTab(nextTab);
+    updateStocksPath(nextTab === "watchlist" ? selectedStockId : "", nextTab);
+  }, [selectedStockId, updateStocksPath]);
 
   const importStock = useCallback(async (event) => {
     event.preventDefault();
@@ -665,8 +693,9 @@ function StocksPage({ stockId = "" }) {
       const detailStatus = data.detailPrefetched ? "；后台已拉取详情数据" : data.detailPrefetchError ? "；详情数据拉取失败" : "";
       setImportStatus(`${data.imported ? "已导入" : "已存在"}：${stock.name || stock.symbol || query}${detailStatus}`);
       if (stock.id) {
+        setStockTab("watchlist");
         setSelectedStockId(stock.id);
-        updateStocksPath(stock.id);
+        updateStocksPath(stock.id, "watchlist");
       }
       const statusText = withWatchlistCount(lastStatusText.current || "自选股票已更新", nextWatchlist.length);
       lastStatusText.current = statusText;
@@ -681,16 +710,17 @@ function StocksPage({ stockId = "" }) {
   const selectStock = useCallback(
     (item) => {
       if (!item?.id) return;
+      setStockTab("watchlist");
       setSelectedStockId(item.id);
       setWatchlistActionStatus("");
-      updateStocksPath(item.id);
+      updateStocksPath(item.id, "watchlist");
     },
     [updateStocksPath]
   );
 
   const closeDetail = useCallback(() => {
     setSelectedStockId("");
-    updateStocksPath("");
+    updateStocksPath("", "watchlist");
   }, [updateStocksPath]);
 
   const startEditStock = useCallback((item) => {
@@ -753,7 +783,7 @@ function StocksPage({ stockId = "" }) {
         setWatchlistActionStatus(`已删除：${stockName}`);
         if (selectedStockId === item.id) {
           setSelectedStockId("");
-          updateStocksPath("");
+          updateStocksPath("", "watchlist");
         }
         if (editingStockId === item.id) {
           setEditingStockId("");
@@ -782,46 +812,78 @@ function StocksPage({ stockId = "" }) {
 
   return (
     <PageShell
-      eyebrow="A股 / 港股 / 美股"
-      title="股票市场流动性与估值"
+      eyebrow={stockTab === "market" ? "大盘 · A股 / 港股 / 美股" : "个股 · 自选股票"}
+      title="股票市场流动性与边际信号"
       activePage="stocks"
       status={status}
       actions={<RefreshButton loading={refreshing} title="刷新股票数据" onClick={requestBackgroundRefresh} />}
     >
-      <section className="market-grid" aria-live="polite">
-        {!markets.length ? (
-          <p className="empty">暂未取到市场流动性数据。</p>
-        ) : (
-          markets.map((market, index) => {
-            const key = marketKey(market, index);
-            return <MarketCard key={key} market={market} snapshotAt={snapshotAt} isNew={newMarketKeys.has(key)} />;
-          })
-        )}
-      </section>
+      <div className="stock-subtabs" role="tablist" aria-label="股票功能">
+        <button
+          id="stock-tab-market"
+          className={stockTab === "market" ? "is-active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={stockTab === "market"}
+          aria-controls="stock-panel-market"
+          onClick={() => selectStockTab("market")}
+        >
+          <strong>大盘</strong>
+          <span>A股边际信号 · 全球市场 · 机构占比</span>
+        </button>
+        <button
+          id="stock-tab-watchlist"
+          className={stockTab === "watchlist" ? "is-active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={stockTab === "watchlist"}
+          aria-controls="stock-panel-watchlist"
+          onClick={() => selectStockTab("watchlist")}
+        >
+          <strong>个股 <em>{watchlist.length}</em></strong>
+          <span>自选股票 · 行情 · 公司详情</span>
+        </button>
+      </div>
 
-      <IndustryFinancingTrendChart trend={industryFinancingTrend} />
-
-      <WatchlistTable
-        items={watchlist}
-        importQuery={importQuery}
-        importStatus={importStatus}
-        importBusy={importBusy}
-        selectedStockId={selectedStockId}
-        actionStatus={watchlistActionStatus}
-        busyId={watchlistBusyId}
-        editingStockId={editingStockId}
-        editingName={editingName}
-        onImport={importStock}
-        onImportQueryChange={setImportQuery}
-        onSelectStock={selectStock}
-        onStartEdit={startEditStock}
-        onCancelEdit={cancelEditStock}
-        onSaveEdit={saveStockName}
-        onDelete={deleteStock}
-        onEditingNameChange={setEditingName}
-      />
-
-      {selectedStockId && <StockWatchDetailEmbed stockId={selectedStockId} status={status} onClose={closeDetail} />}
+      {stockTab === "market" ? (
+        <div id="stock-panel-market" className="stock-tab-panel" role="tabpanel" aria-labelledby="stock-tab-market">
+          <section className="market-grid" aria-live="polite">
+            {!markets.length ? (
+              <p className="empty">暂未取到市场流动性数据。</p>
+            ) : (
+              markets.map((market, index) => {
+                const key = marketKey(market, index);
+                return <MarketCard key={key} market={market} snapshotAt={snapshotAt} isNew={newMarketKeys.has(key)} />;
+              })
+            )}
+          </section>
+          <InstitutionIndustryDashboard allocation={institutionAllocation} financingTrend={industryFinancingTrend} />
+          <MarginalSignalsBoard data={marginalSignals} />
+        </div>
+      ) : (
+        <div id="stock-panel-watchlist" className="stock-tab-panel" role="tabpanel" aria-labelledby="stock-tab-watchlist">
+          <WatchlistTable
+            items={watchlist}
+            importQuery={importQuery}
+            importStatus={importStatus}
+            importBusy={importBusy}
+            selectedStockId={selectedStockId}
+            actionStatus={watchlistActionStatus}
+            busyId={watchlistBusyId}
+            editingStockId={editingStockId}
+            editingName={editingName}
+            onImport={importStock}
+            onImportQueryChange={setImportQuery}
+            onSelectStock={selectStock}
+            onStartEdit={startEditStock}
+            onCancelEdit={cancelEditStock}
+            onSaveEdit={saveStockName}
+            onDelete={deleteStock}
+            onEditingNameChange={setEditingName}
+          />
+          {selectedStockId && <StockWatchDetailEmbed stockId={selectedStockId} status={status} onClose={closeDetail} />}
+        </div>
+      )}
     </PageShell>
   );
 }
@@ -1140,6 +1202,1095 @@ function formatIndustryAxisValue(value) {
 
 function formatIndustryFinancingValue(value) {
   return Number(value).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+
+function InstitutionIndustryDashboard({ allocation = {}, financingTrend = {} }) {
+  const categories = useMemo(() => {
+    const byId = new Map((allocation.categories || []).map((category) => [category.id, category]));
+    return INSTITUTION_CATEGORY_DEFS.map((definition) => ({
+      ...definition,
+      available: byId.has(definition.id),
+      hasLevel2Data: false,
+      ...(byId.get(definition.id) || {})
+    }));
+  }, [allocation.categories]);
+  const industryGroups = useMemo(() => {
+    if (Array.isArray(allocation.industryGroups) && allocation.industryGroups.length) return allocation.industryGroups;
+    return (allocation.industries || []).map((industry) => ({
+      id: industry.name,
+      name: industry.name,
+      level: 1,
+      values: industry.values || {},
+      children: []
+    }));
+  }, [allocation.industryGroups, allocation.industries]);
+  const officialGroups = useMemo(() => industryGroups.filter((group) => !group.isUnclassified), [industryGroups]);
+  const metricOptions = useMemo(() => [
+    ...categories.map((category) => ({
+      ...category,
+      kind: "holding",
+      unit: "%",
+      dateLabel: category.reportDate || "本轮未取到",
+      title: `${category.label}行业持仓占比`
+    })),
+    {
+      id: "financing_net_buy",
+      label: "累计融资净买入",
+      kind: "line",
+      unit: financingTrend?.unit || "亿元",
+      dateLabel: financingTrend?.startDate && financingTrend?.endDate
+        ? `${formatIndustryChartDate(financingTrend.startDate)} — ${formatIndustryChartDate(financingTrend.endDate)}`
+        : "近三年",
+      title: "近三年申万行业累计融资净买入",
+      source: financingTrend?.source,
+      sourceUrl: financingTrend?.sourceUrl,
+      note: financingTrend?.note
+    },
+    {
+      id: "financing_balance",
+      label: "融资余额",
+      kind: "balance",
+      unit: financingTrend?.unit || "亿元",
+      dateLabel: formatIndustryChartDate(financingTrend?.balanceDate) || "最新完整交易日",
+      title: "申万行业最新融资余额",
+      source: financingTrend?.source,
+      sourceUrl: financingTrend?.sourceUrl,
+      note: "融资余额取各行业最新完整交易日数据。"
+    }
+  ], [categories, financingTrend]);
+  const [selectedMetricId, setSelectedMetricId] = useState("public_fund");
+  const [drilledGroups, setDrilledGroups] = useState(new Set());
+  const [expandedRows, setExpandedRows] = useState(new Set());
+  const [hiddenGroups, setHiddenGroups] = useState(new Set());
+  const [hiddenSeries, setHiddenSeries] = useState(new Set());
+  const [financingDetails, setFinancingDetails] = useState({});
+  const [loadingGroups, setLoadingGroups] = useState(new Set());
+  const [groupErrors, setGroupErrors] = useState({});
+  const inFlightGroups = useRef(new Set());
+  const currentMetric = metricOptions.find((metric) => metric.id === selectedMetricId) || metricOptions[0];
+
+  useEffect(() => {
+    if (!metricOptions.some((metric) => metric.id === selectedMetricId)) setSelectedMetricId("public_fund");
+  }, [metricOptions, selectedMetricId]);
+
+  useEffect(() => {
+    setFinancingDetails({});
+    setLoadingGroups(new Set());
+    setGroupErrors({});
+    inFlightGroups.current.clear();
+  }, [financingTrend?.endDate]);
+
+  const loadFinancingGroup = useCallback(async (parentIndustry) => {
+    if (!parentIndustry || financingDetails[parentIndustry] || inFlightGroups.current.has(parentIndustry)) return;
+    inFlightGroups.current.add(parentIndustry);
+    setLoadingGroups((current) => new Set(current).add(parentIndustry));
+    setGroupErrors((current) => {
+      const next = { ...current };
+      delete next[parentIndustry];
+      return next;
+    });
+    try {
+      const detail = await getJson(`/api/stocks/industry-financing/${encodeURIComponent(parentIndustry)}?t=${Date.now()}`);
+      setFinancingDetails((current) => ({ ...current, [parentIndustry]: detail }));
+    } catch (error) {
+      setGroupErrors((current) => ({ ...current, [parentIndustry]: error.message || "二级融资数据加载失败" }));
+    } finally {
+      inFlightGroups.current.delete(parentIndustry);
+      setLoadingGroups((current) => {
+        const next = new Set(current);
+        next.delete(parentIndustry);
+        return next;
+      });
+    }
+  }, [financingDetails]);
+
+  const toggleChartDrill = useCallback((group) => {
+    const isOpen = drilledGroups.has(group.id);
+    if (!isOpen && currentMetric.kind === "holding" && !currentMetric.hasLevel2Data) return;
+    setDrilledGroups((current) => {
+      const next = new Set(current);
+      if (next.has(group.id)) next.delete(group.id);
+      else next.add(group.id);
+      return next;
+    });
+    if (!isOpen) loadFinancingGroup(group.name);
+  }, [currentMetric, drilledGroups, loadFinancingGroup]);
+
+  const toggleTableGroup = useCallback((group) => {
+    const isOpen = expandedRows.has(group.id);
+    setExpandedRows((current) => {
+      const next = new Set(current);
+      if (next.has(group.id)) next.delete(group.id);
+      else next.add(group.id);
+      return next;
+    });
+    if (!isOpen) loadFinancingGroup(group.name);
+  }, [expandedRows, loadFinancingGroup]);
+
+  const parentFinancing = useMemo(
+    () => new Map((financingTrend?.series || []).map((series) => [series.name, series])),
+    [financingTrend?.series]
+  );
+  const chartEntities = useMemo(() => {
+    const entities = [];
+    officialGroups.forEach((group, parentIndex) => {
+      const detail = financingDetails[group.name];
+      const detailByName = new Map((detail?.series || []).map((series) => [series.name, series]));
+      const isDrilled = drilledGroups.has(group.id);
+      const canReplaceParent = isDrilled && group.children?.length && (
+        currentMetric.kind === "holding" ? currentMetric.hasLevel2Data : detailByName.size > 0
+      );
+      const nodes = canReplaceParent ? group.children : [group];
+      nodes.forEach((node, childIndex) => {
+        const isChild = node.level === 2;
+        const financingSeries = isChild ? detailByName.get(node.name) : parentFinancing.get(group.name);
+        const holdingValue = finiteChartNumber(node.values?.[currentMetric.id]?.sharePct);
+        const value = currentMetric.kind === "holding"
+          ? holdingValue
+          : currentMetric.kind === "balance"
+            ? finiteChartNumber(financingSeries?.latestBalance)
+            : finiteChartNumber(financingSeries?.latest);
+        entities.push({
+          id: node.id || `${group.id}/${node.name}`,
+          name: node.name,
+          parentId: group.id,
+          parentName: group.name,
+          level: node.level || 1,
+          value,
+          values: financingSeries?.values || [],
+          dates: isChild ? detail?.dates || [] : financingTrend?.dates || [],
+          color: isChild
+            ? INDUSTRY_FINANCING_COLORS[(parentIndex + childIndex + 1) % INDUSTRY_FINANCING_COLORS.length]
+            : INDUSTRY_FINANCING_COLORS[parentIndex % INDUSTRY_FINANCING_COLORS.length]
+        });
+      });
+    });
+    return entities;
+  }, [currentMetric, drilledGroups, financingDetails, financingTrend?.dates, officialGroups, parentFinancing]);
+  const visibleEntities = chartEntities.filter(
+    (entity) => !hiddenGroups.has(entity.parentId) && !hiddenSeries.has(entity.id)
+  );
+  const selectedMeta = currentMetric || {};
+  const selectedSource = selectedMeta.source || (selectedMeta.kind === "holding" ? selectedMeta.source : financingTrend?.source);
+  const selectedSourceUrl = selectedMeta.sourceUrl || (selectedMeta.kind === "holding" ? selectedMeta.sourceUrl : financingTrend?.sourceUrl);
+  const selectedNote = selectedMeta.note || (selectedMeta.kind === "holding" ? allocation.basis : financingTrend?.note);
+  const errors = allocation.errors || [];
+  const hasDashboardData = officialGroups.length > 0 || (financingTrend?.series || []).length > 0;
+
+  const toggleGroupVisibility = (groupId) => {
+    setHiddenGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  };
+
+  const toggleChildVisibility = (seriesId) => {
+    setHiddenSeries((current) => {
+      const next = new Set(current);
+      if (next.has(seriesId)) next.delete(seriesId);
+      else next.add(seriesId);
+      return next;
+    });
+  };
+
+  return (
+    <section className="industry-dashboard" aria-labelledby="industry-dashboard-title">
+      <header className="industry-dashboard-heading">
+        <div>
+          <p className="eyebrow">行业资金全景</p>
+          <h2 id="industry-dashboard-title">机构持仓与融资</h2>
+          <p>一张主图切换 7 类机构持仓、近三年累计融资净买入和最新融资余额；表格始终保留完整数据。</p>
+        </div>
+        <div className="industry-dashboard-summary">
+          <strong>{officialGroups.length || 31}</strong>
+          <span>申万一级行业</span>
+        </div>
+      </header>
+
+      <div className="industry-metric-tabs" role="tablist" aria-label="行业资金指标">
+        {metricOptions.map((metric) => (
+          <button
+            key={metric.id}
+            className={selectedMetricId === metric.id ? "is-active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={selectedMetricId === metric.id}
+            onClick={() => setSelectedMetricId(metric.id)}
+          >
+            <strong>{metric.label}</strong>
+            <small>{metric.dateLabel}</small>
+          </button>
+        ))}
+      </div>
+
+      <div className="industry-dashboard-source">
+        <div>
+          <strong>{selectedMeta.title}</strong>
+          <span>截至 {selectedMeta.dateLabel} · 单位：{selectedMeta.unit}</span>
+        </div>
+        {selectedSourceUrl ? (
+          <a href={selectedSourceUrl} target="_blank" rel="noreferrer">
+            {selectedSource || "查看来源"} <ExternalLink size={12} aria-hidden="true" />
+          </a>
+        ) : (
+          <span>{selectedSource || "本轮来源未取到"}</span>
+        )}
+      </div>
+
+      {!hasDashboardData ? (
+        <p className="empty">机构持仓与行业融资数据正在建立快照。</p>
+      ) : (
+        <>
+          <div className="industry-dashboard-chart-panel">
+            {currentMetric.kind === "line" ? (
+              <IndustryMetricLineChart
+                entities={visibleEntities}
+                title={currentMetric.title}
+                unit={currentMetric.unit}
+              />
+            ) : (
+              <IndustryMetricBarChart
+                entities={visibleEntities}
+                title={currentMetric.title}
+                unit={currentMetric.unit}
+              />
+            )}
+          </div>
+
+          <div className="industry-hierarchical-legend" aria-label="按申万一级分组的行业图例">
+            <div className="industry-legend-toolbar">
+              <strong>图例 · 按申万一级分组</strong>
+              <span>父级控制整组；展开后由二级行业替换父级</span>
+              {(hiddenGroups.size > 0 || hiddenSeries.size > 0) && (
+                <button type="button" onClick={() => { setHiddenGroups(new Set()); setHiddenSeries(new Set()); }}>
+                  显示全部
+                </button>
+              )}
+            </div>
+            <div className="industry-legend-groups">
+              {officialGroups.map((group, parentIndex) => {
+                const drilled = drilledGroups.has(group.id);
+                const groupHidden = hiddenGroups.has(group.id);
+                const cannotDrill = currentMetric.kind === "holding" && !currentMetric.hasLevel2Data;
+                const effectiveDrill = drilled && !cannotDrill;
+                return (
+                  <article className={`industry-legend-group${effectiveDrill ? " is-open" : ""}`} key={group.id}>
+                    <div className="industry-legend-parent">
+                      <button
+                        className={`industry-legend-toggle${groupHidden ? " is-hidden" : ""}`}
+                        type="button"
+                        aria-pressed={!groupHidden}
+                        onClick={() => toggleGroupVisibility(group.id)}
+                        title={`${groupHidden ? "显示" : "隐藏"}${group.name}整组`}
+                      >
+                        <span style={{ background: INDUSTRY_FINANCING_COLORS[parentIndex % INDUSTRY_FINANCING_COLORS.length] }} aria-hidden="true" />
+                        {group.name}
+                      </button>
+                      {!!group.children?.length && (
+                        <button
+                          className="industry-legend-drill"
+                          type="button"
+                          disabled={cannotDrill}
+                          aria-expanded={effectiveDrill}
+                          onClick={() => toggleChartDrill(group)}
+                          title={cannotDrill ? `${currentMetric.label}未披露二级行业，不能展开` : `${drilled ? "收起" : "展开"}${group.name}二级行业`}
+                        >
+                          {cannotDrill ? "未披露" : drilled ? "收起" : "二级"}
+                        </button>
+                      )}
+                    </div>
+                    {effectiveDrill && (
+                      <div className="industry-legend-children">
+                        {loadingGroups.has(group.name) && currentMetric.kind !== "holding" && <span className="industry-group-status">二级融资加载中…</span>}
+                        {groupErrors[group.name] && currentMetric.kind !== "holding" && <span className="industry-group-status is-error">{groupErrors[group.name]}</span>}
+                        {group.children.map((child, childIndex) => {
+                          const hidden = hiddenSeries.has(child.id);
+                          return (
+                            <button
+                              key={child.id}
+                              className={hidden ? "is-hidden" : ""}
+                              type="button"
+                              aria-pressed={!hidden}
+                              onClick={() => toggleChildVisibility(child.id)}
+                            >
+                              <span style={{ background: INDUSTRY_FINANCING_COLORS[(parentIndex + childIndex + 1) % INDUSTRY_FINANCING_COLORS.length] }} aria-hidden="true" />
+                              {child.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </div>
+
+          <IndustryAllocationTable
+            categories={categories}
+            groups={industryGroups}
+            financingTrend={financingTrend}
+            financingDetails={financingDetails}
+            expandedRows={expandedRows}
+            loadingGroups={loadingGroups}
+            groupErrors={groupErrors}
+            onToggleGroup={toggleTableGroup}
+          />
+        </>
+      )}
+
+      {selectedNote && <p className="industry-dashboard-note">{selectedNote}</p>}
+      {!!errors.length && <p className="industry-dashboard-warning">部分机构来源本轮未取到：{errors.join("；")}</p>}
+      {!!allocation.notes?.length && (
+        <details className="industry-dashboard-methodology">
+          <summary>查看持仓口径与数据限制</summary>
+          <ul>{allocation.notes.map((note) => <li key={note}>{note}</li>)}</ul>
+        </details>
+      )}
+    </section>
+  );
+}
+
+
+function IndustryAllocationTable({
+  categories,
+  groups,
+  financingTrend,
+  financingDetails,
+  expandedRows,
+  loadingGroups,
+  groupErrors,
+  onToggleGroup
+}) {
+  const parentFinancing = new Map((financingTrend?.series || []).map((series) => [series.name, series]));
+
+  return (
+    <div className="industry-dashboard-table-wrap">
+      <table className="industry-dashboard-table">
+        <thead>
+          <tr>
+            <th rowSpan="2" scope="col">申万行业</th>
+            <th colSpan={categories.length} scope="colgroup">机构持仓 · 占已披露样本比例</th>
+            <th colSpan="2" scope="colgroup">融资 · 亿元</th>
+          </tr>
+          <tr>
+            {categories.map((category) => (
+              <th scope="col" key={category.id}>
+                <strong>{category.label}</strong>
+                <small>{category.reportDate || "未取到"}</small>
+              </th>
+            ))}
+            <th scope="col">
+              <strong>近3年累计净买入</strong>
+              <small>{formatIndustryChartDate(financingTrend?.endDate) || "未取到"}</small>
+            </th>
+            <th scope="col">
+              <strong>最新融资余额</strong>
+              <small>{formatIndustryChartDate(financingTrend?.balanceDate) || "未取到"}</small>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((group) => {
+            const expanded = expandedRows.has(group.id);
+            const detail = financingDetails[group.name];
+            const childFinancing = new Map((detail?.series || []).map((series) => [series.name, series]));
+            const parentSeries = parentFinancing.get(group.name);
+            const canExpand = !group.isUnclassified && !!group.children?.length;
+            return (
+              <Fragment key={group.id}>
+                <tr className={group.isUnclassified ? "is-unclassified" : "is-level-one"}>
+                  <th scope="row">
+                    {canExpand ? (
+                      <button type="button" aria-expanded={expanded} onClick={() => onToggleGroup(group)}>
+                        <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+                        {group.name}
+                      </button>
+                    ) : group.name}
+                  </th>
+                  {categories.map((category) => (
+                    <IndustryHoldingCell
+                      key={category.id}
+                      category={category}
+                      cell={group.values?.[category.id]}
+                      level={1}
+                    />
+                  ))}
+                  <IndustryFinancingCell value={parentSeries?.latest} kind="flow" />
+                  <IndustryFinancingCell value={parentSeries?.latestBalance} kind="balance" />
+                </tr>
+                {expanded && group.children.map((child) => {
+                  const childSeries = childFinancing.get(child.name);
+                  const financeUnavailable = detail?.unavailableChildren?.includes(child.name);
+                  return (
+                    <tr className="is-level-two" key={child.id}>
+                      <th scope="row"><span>{child.name}</span></th>
+                      {categories.map((category) => (
+                        <IndustryHoldingCell
+                          key={category.id}
+                          category={category}
+                          cell={child.values?.[category.id]}
+                          level={2}
+                        />
+                      ))}
+                      <IndustryFinancingCell
+                        value={childSeries?.latest}
+                        kind="flow"
+                        loading={loadingGroups.has(group.name)}
+                        error={groupErrors[group.name]}
+                        unavailable={financeUnavailable || (!!detail && !childSeries)}
+                      />
+                      <IndustryFinancingCell
+                        value={childSeries?.latestBalance}
+                        kind="balance"
+                        loading={loadingGroups.has(group.name)}
+                        error={groupErrors[group.name]}
+                        unavailable={financeUnavailable || (!!detail && !childSeries)}
+                      />
+                    </tr>
+                  );
+                })}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+
+function IndustryHoldingCell({ category, cell, level }) {
+  if (!category.available) return <td><span className="industry-cell-missing">— 数据未取到</span></td>;
+  if (level === 2 && !category.hasLevel2Data) return <td><span className="industry-cell-missing">— 未披露</span></td>;
+  if (!cell) return <td><span className="industry-cell-missing">—</span></td>;
+  return (
+    <td>
+      <strong>{formatPctPlain(cell.sharePct)}</strong>
+      <small>{formatMoney(cell.marketValue, "CNY")}</small>
+    </td>
+  );
+}
+
+
+function IndustryFinancingCell({ value, kind, loading = false, error = "", unavailable = false }) {
+  const number = finiteChartNumber(value);
+  if (loading) return <td><span className="industry-cell-missing">加载中…</span></td>;
+  if (error) return <td title={error}><span className="industry-cell-missing">— 数据源异常</span></td>;
+  if (unavailable || number === null) return <td><span className="industry-cell-missing">— 未提供</span></td>;
+  const tone = kind === "flow" ? (number > 0 ? "is-positive" : number < 0 ? "is-negative" : "") : "";
+  return <td><strong className={tone}>{formatIndustryFinancingValue(number)}</strong></td>;
+}
+
+
+function IndustryMetricBarChart({ entities, title, unit }) {
+  if (!entities.length) return <p className="empty">当前图例已隐藏全部行业，请在下方恢复显示。</p>;
+  const width = 1280;
+  const rowHeight = 30;
+  const margin = { top: 38, right: 96, bottom: 42, left: 154 };
+  const height = Math.max(310, margin.top + margin.bottom + entities.length * rowHeight);
+  const plotWidth = width - margin.left - margin.right;
+  const values = entities.map((entity) => finiteChartNumber(entity.value)).filter((value) => value !== null);
+  const observedMin = values.length ? Math.min(0, ...values) : 0;
+  const observedMax = values.length ? Math.max(0, ...values) : 1;
+  const span = observedMax - observedMin || Math.max(Math.abs(observedMax), 1);
+  const min = observedMin < 0 ? observedMin - span * 0.06 : 0;
+  const max = observedMax + span * 0.08 || 1;
+  const xAt = (value) => margin.left + ((value - min) / (max - min)) * plotWidth;
+  const zeroX = xAt(0);
+  const step = niceIndustryChartStep((max - min) / 6);
+  const tickStart = Math.ceil(min / step) * step;
+  const ticks = [];
+  for (let value = tickStart; value <= max + step / 2; value += step) ticks.push(Number(value.toFixed(8)));
+
+  return (
+    <div className="industry-dashboard-chart-scroll is-bar">
+      <div className="industry-dashboard-bar-canvas" style={{ minHeight: `${height}px` }}>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title}，单位${unit}`}>
+          <title>{title}</title>
+          <text className="industry-financing-unit" x={margin.left} y="20">{unit}</text>
+          {ticks.map((tick) => {
+            const x = xAt(tick);
+            return (
+              <g key={tick}>
+                <line className={tick === 0 ? "industry-financing-zero-line" : "industry-financing-grid-line"} x1={x} x2={x} y1={margin.top - 8} y2={height - margin.bottom} />
+                <text className={tick < 0 ? "industry-financing-axis-label is-negative" : "industry-financing-axis-label"} x={x} y={height - 17} textAnchor="middle">
+                  {formatIndustryAxisValue(tick)}
+                </text>
+              </g>
+            );
+          })}
+          {entities.map((entity, index) => {
+            const value = finiteChartNumber(entity.value);
+            const y = margin.top + index * rowHeight;
+            const endX = value === null ? zeroX : xAt(value);
+            const barX = Math.min(zeroX, endX);
+            const barWidth = Math.max(Math.abs(endX - zeroX), value === null ? 0 : 1);
+            const valueText = value === null
+              ? "—"
+              : unit === "%"
+                ? formatPctPlain(value)
+                : formatIndustryFinancingValue(value);
+            return (
+              <g key={entity.id}>
+                {index % 2 === 1 && <rect className="industry-dashboard-row-band" x="0" y={y - 2} width={width} height={rowHeight} />}
+                <text className={`industry-dashboard-bar-label${entity.level === 2 ? " is-child" : ""}`} x={margin.left - 12} y={y + 18} textAnchor="end">
+                  {entity.level === 2 ? `↳ ${entity.name}` : entity.name}
+                </text>
+                {value !== null && (
+                  <rect className="industry-dashboard-bar" x={barX} y={y + 5} width={barWidth} height="17" rx="3" fill={entity.color}>
+                    <title>{entity.parentName !== entity.name ? `${entity.parentName} / ` : ""}{entity.name}：{valueText} {unit === "%" ? "" : unit}</title>
+                  </rect>
+                )}
+                <text
+                  className={`industry-dashboard-bar-value${value !== null && value < 0 ? " is-negative" : ""}`}
+                  x={value !== null && value < 0 ? barX - 7 : endX + 7}
+                  y={y + 18}
+                  textAnchor={value !== null && value < 0 ? "end" : "start"}
+                >
+                  {valueText}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+
+function IndustryMetricLineChart({ entities, title, unit }) {
+  const [hover, setHover] = useState(null);
+  const svgRef = useRef(null);
+  const dates = useMemo(() => {
+    const allDates = new Set();
+    entities.forEach((entity) => (entity.dates || []).forEach((date) => allDates.add(date)));
+    return [...allDates].sort();
+  }, [entities]);
+  const series = useMemo(() => entities.map((entity) => {
+    const valuesByDate = new Map((entity.dates || []).map((date, index) => [date, entity.values?.[index]]));
+    return { ...entity, values: dates.map((date) => valuesByDate.has(date) ? valuesByDate.get(date) : null) };
+  }), [dates, entities]);
+  const hasData = dates.length > 0 && series.some((item) => item.values.some((value) => finiteChartNumber(value) !== null));
+  if (!entities.length) return <p className="empty">当前图例已隐藏全部行业，请在下方恢复显示。</p>;
+  if (!hasData) return <p className="empty">所选行业的近三年融资净买入数据尚未取到。</p>;
+
+  const width = 1440;
+  const height = 610;
+  const margin = { top: 34, right: 30, bottom: 84, left: 86 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const scale = industryFinancingChartScale(series);
+  const xAt = (index) => margin.left + (dates.length <= 1 ? 0 : (index / (dates.length - 1)) * plotWidth);
+  const yAt = (value) => margin.top + ((scale.max - value) / (scale.max - scale.min)) * plotHeight;
+  const dateTicks = chartDateTickIndices(dates.length, 14);
+  const hoveredSeries = series.find((item) => item.id === hover?.seriesId);
+  const hoveredValue = hoveredSeries && hover ? finiteChartNumber(hoveredSeries.values?.[hover.index]) : null;
+  const hoverX = hover ? xAt(hover.index) : 0;
+  const hoverY = hoveredValue === null ? 0 : yAt(hoveredValue);
+
+  const handlePointerMove = (event) => {
+    const svg = svgRef.current;
+    if (!svg || !dates.length || !series.length) return;
+    const bounds = svg.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
+    const viewX = ((event.clientX - bounds.left) / bounds.width) * width;
+    const viewY = ((event.clientY - bounds.top) / bounds.height) * height;
+    const clampedX = Math.min(margin.left + plotWidth, Math.max(margin.left, viewX));
+    const index = dates.length <= 1 ? 0 : Math.round(((clampedX - margin.left) / plotWidth) * (dates.length - 1));
+    let nearest = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (const item of series) {
+      const value = finiteChartNumber(item.values?.[index]);
+      if (value === null) continue;
+      const distance = Math.abs(yAt(value) - viewY);
+      if (distance < nearestDistance) {
+        nearest = item;
+        nearestDistance = distance;
+      }
+    }
+    if (nearest) setHover({ index, seriesId: nearest.id });
+  };
+
+  return (
+    <div className="industry-dashboard-chart-scroll">
+      <div className="industry-dashboard-line-canvas">
+        <svg
+          ref={svgRef}
+          className="industry-financing-chart"
+          viewBox={`0 0 ${width} ${height}`}
+          role="img"
+          aria-label={`${title}，${formatIndustryChartDate(dates[0])}至${formatIndustryChartDate(dates[dates.length - 1])}，单位${unit}`}
+          onPointerMove={handlePointerMove}
+          onPointerLeave={() => setHover(null)}
+        >
+          <title>{title}</title>
+          <text className="industry-financing-unit" x={margin.left} y="18">{unit}</text>
+          {scale.ticks.map((tick) => {
+            const y = yAt(tick);
+            return (
+              <g key={tick}>
+                <line className={tick === 0 ? "industry-financing-zero-line" : "industry-financing-grid-line"} x1={margin.left} x2={margin.left + plotWidth} y1={y} y2={y} />
+                <text className={tick < 0 ? "industry-financing-axis-label is-negative" : "industry-financing-axis-label"} x={margin.left - 12} y={y + 4} textAnchor="end">
+                  {formatIndustryAxisValue(tick)}
+                </text>
+              </g>
+            );
+          })}
+          {dateTicks.map((index) => {
+            const x = xAt(index);
+            return (
+              <g key={`${dates[index]}-${index}`}>
+                <line className="industry-financing-x-tick" x1={x} x2={x} y1={margin.top + plotHeight} y2={margin.top + plotHeight + 6} />
+                <text className="industry-financing-date-label" x={x} y={margin.top + plotHeight + 20} textAnchor="middle">
+                  {formatIndustryChartDate(dates[index])}
+                </text>
+              </g>
+            );
+          })}
+          {series.map((item) => {
+            const path = buildIndustryLinePath(item.values, xAt, yAt);
+            if (!path) return null;
+            const focused = !hover?.seriesId || hover.seriesId === item.id;
+            return (
+              <path
+                key={item.id}
+                className="industry-financing-line"
+                d={path}
+                fill="none"
+                stroke={item.color}
+                strokeWidth={hover?.seriesId === item.id ? 3 : 1.55}
+                opacity={focused ? 0.92 : 0.11}
+                vectorEffect="non-scaling-stroke"
+              />
+            );
+          })}
+          {hover && hoveredSeries && hoveredValue !== null && (
+            <g className="industry-financing-hover" pointerEvents="none">
+              <line x1={hoverX} x2={hoverX} y1={margin.top} y2={margin.top + plotHeight} />
+              <circle cx={hoverX} cy={hoverY} r="5" fill={hoveredSeries.color} />
+              <g transform={`translate(${Math.min(width - 244, Math.max(margin.left + 4, hoverX + (hoverX > width - 280 ? -236 : 12)))}, ${Math.min(margin.top + plotHeight - 62, Math.max(margin.top + 8, hoverY - 28))})`}>
+                <rect width="224" height="54" rx="7" />
+                <text x="11" y="20">{formatIndustryChartDate(dates[hover.index])} · {hoveredSeries.name}</text>
+                <text className="industry-financing-tooltip-value" x="11" y="41">{formatIndustryFinancingValue(hoveredValue)} {unit}</text>
+              </g>
+            </g>
+          )}
+          <rect className="industry-financing-hit-area" x={margin.left} y={margin.top} width={plotWidth} height={plotHeight} />
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+
+function MarginalSignalsBoard({ data = {} }) {
+  const cards = Array.isArray(data.cards) ? data.cards : [];
+  const notes = Array.isArray(data.notes) ? data.notes : [];
+  const [expandedId, setExpandedId] = useState("");
+  const expandedCard = cards.find((card) => card.id === expandedId);
+
+  useEffect(() => {
+    if (expandedId && !expandedCard) setExpandedId("");
+  }, [expandedCard, expandedId]);
+
+  return (
+    <section className="marginal-signals" aria-labelledby="marginal-signals-title">
+      <div className="marginal-signals-heading">
+        <div>
+          <p className="eyebrow">A股边际雷达</p>
+          <h2 id="marginal-signals-title">比余额更快的资金、对冲与供给信号</h2>
+          <p>真实流量、杠杆/保护、股票供给和市场扩散四组一起看；卡片右上角可放大。</p>
+        </div>
+        <span className="marginal-cadence">交易日 · 最多半小时刷新</span>
+      </div>
+
+      {!cards.length ? (
+        <p className="empty">边际信号正在建立首个快照，全球市场总览仍可正常使用。</p>
+      ) : (
+        <div className="marginal-signal-grid" aria-live="polite">
+          {cards.map((card) => (
+            <MarginalSignalCard card={card} key={card.id || card.title} onExpand={() => setExpandedId(card.id)} />
+          ))}
+        </div>
+      )}
+
+      {!!notes.length && (
+        <ul className="marginal-signal-notes">
+          {notes.map((note) => <li key={note}>{note}</li>)}
+        </ul>
+      )}
+
+      {expandedCard && <SignalDetailModal card={expandedCard} onClose={() => setExpandedId("")} />}
+    </section>
+  );
+}
+
+function MarginalSignalCard({ card, onExpand }) {
+  const metrics = Array.isArray(card.metrics) ? card.metrics.slice(0, 4) : [];
+  const chart = Array.isArray(card.charts) ? card.charts[0] : null;
+  const isAvailable = card.status !== "unavailable";
+
+  return (
+    <article className={`marginal-signal-card${isAvailable ? "" : " is-unavailable"}`}>
+      <header className="marginal-signal-card-head">
+        <div>
+          <p className="marginal-signal-kicker">
+            {card.eyebrow || "边际信号"}
+            {card.sourceBadge && <span>{card.sourceBadge}</span>}
+          </p>
+          <h3>{card.title || "未命名信号"}</h3>
+        </div>
+        <button
+          className="signal-expand-button"
+          type="button"
+          onClick={onExpand}
+          aria-label={`放大查看${card.title || "信号"}`}
+          title="放大查看详情"
+        >
+          <Maximize2 size={15} aria-hidden="true" />
+        </button>
+      </header>
+
+      <p className="marginal-signal-description">{card.description || card.note || "暂无说明"}</p>
+
+      {!!metrics.length && (
+        <div className="marginal-signal-kpis">
+          {metrics.map((metric) => (
+            <div key={metric.label} title={metric.note || undefined}>
+              <span>{metric.label}</span>
+              <strong className={signalToneClass(metric)}>{formatSignalValue(metric.value, metric.format)}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="marginal-signal-chart-wrap">
+        {chart ? <SignalChart chart={chart} /> : <p className="signal-chart-empty">{card.note || "本轮暂无可画数据"}</p>}
+      </div>
+
+      <footer className="marginal-signal-footer">
+        <span>{card.dataTimestamp || "日期待更新"}</span>
+        {card.sourceUrl ? (
+          <a href={card.sourceUrl} target="_blank" rel="noreferrer">
+            {card.source || "查看来源"} <ExternalLink size={11} aria-hidden="true" />
+          </a>
+        ) : (
+          <span>{card.source || "公开来源"}</span>
+        )}
+      </footer>
+    </article>
+  );
+}
+
+function SignalDetailModal({ card, onClose }) {
+  const closeButton = useRef(null);
+  const metrics = Array.isArray(card.metrics) ? card.metrics : [];
+  const charts = Array.isArray(card.charts) ? card.charts : [];
+  const details = Array.isArray(card.details) ? card.details : [];
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeButton.current?.focus();
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="signal-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="signal-modal" role="dialog" aria-modal="true" aria-labelledby={`signal-modal-${card.id}`}>
+        <header className="signal-modal-head">
+          <div>
+            <p className="eyebrow">{card.eyebrow || "A股边际信号"}</p>
+            <h2 id={`signal-modal-${card.id}`}>{card.title}</h2>
+            <p>{card.description}</p>
+          </div>
+          <button ref={closeButton} type="button" onClick={onClose} aria-label="关闭详情" title="关闭">
+            <X size={18} aria-hidden="true" />
+          </button>
+        </header>
+
+        {!!metrics.length && (
+          <div className="signal-modal-kpis">
+            {metrics.map((metric) => (
+              <div key={metric.label}>
+                <span>{metric.label}</span>
+                <strong className={signalToneClass(metric)}>{formatSignalValue(metric.value, metric.format)}</strong>
+                {metric.note && <small>{metric.note}</small>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="signal-modal-charts">
+          {charts.map((chart) => (
+            <article key={chart.id || chart.title}>
+              <h3>{chart.title}</h3>
+              <SignalChart chart={chart} expanded />
+            </article>
+          ))}
+          {!charts.length && <p className="signal-chart-empty">{card.note || "暂无可画数据"}</p>}
+        </div>
+
+        {!!details.length && (
+          <section className="signal-detail-list" aria-label="分项明细">
+            <h3>分项明细</h3>
+            <div>
+              {details.map((item, index) => (
+                <p key={`${item.label}-${index}`}>
+                  <span>{item.label}<small>{item.note || ""}</small></span>
+                  <strong>{formatSignalValue(item.value, item.format)}</strong>
+                </p>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <footer className="signal-modal-source">
+          {card.sourceBadge && <span className="signal-source-badge">{card.sourceBadge}</span>}
+          <p><strong>口径：</strong>{card.note || "—"}</p>
+          <p><strong>频率：</strong>{card.cadence || "随快照刷新"}</p>
+          {card.sourceUrl ? (
+            <a href={card.sourceUrl} target="_blank" rel="noreferrer">
+              {card.source || "查看原始来源"} <ExternalLink size={12} aria-hidden="true" />
+            </a>
+          ) : (
+            <span>{card.source || "公开来源"}</span>
+          )}
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function SignalChart({ chart, expanded = false }) {
+  const series = Array.isArray(chart.series)
+    ? chart.series
+        .map((item) => ({
+          ...item,
+          points: Array.isArray(item.points)
+            ? item.points
+                .map((point) => ({ ...point, value: Number(point.value) }))
+                .filter((point) => Number.isFinite(point.value))
+            : []
+        }))
+        .filter((item) => item.points.length)
+    : [];
+  if (!series.length) return <p className="signal-chart-empty">暂无可画数据</p>;
+
+  const width = expanded ? 820 : 360;
+  const height = expanded ? 270 : 132;
+  const padding = expanded ? { top: 24, right: 22, bottom: 38, left: 58 } : { top: 17, right: 12, bottom: 23, left: 33 };
+  const innerWidth = width - padding.left - padding.right;
+  const innerHeight = height - padding.top - padding.bottom;
+  const values = series.flatMap((item) => item.points.map((point) => point.value));
+  let min = Math.min(...values, 0);
+  let max = Math.max(...values, 0);
+  if (min === max) {
+    const delta = Math.max(Math.abs(max) * 0.05, 1);
+    min -= delta;
+    max += delta;
+  }
+  const span = max - min;
+  const yFor = (value) => padding.top + ((max - value) / span) * innerHeight;
+  const baseline = yFor(0);
+  const formatAxis = (value) => {
+    if (Math.abs(value) >= 1000) return `${(value / 1000).toFixed(1)}k`;
+    if (Math.abs(value) >= 100) return value.toFixed(0);
+    if (Math.abs(value) >= 10) return value.toFixed(1);
+    return value.toFixed(2);
+  };
+  const labelFor = (label) => {
+    const text = String(label || "");
+    return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text.slice(5) : text;
+  };
+  const kind = chart.kind === "bar" ? "bar" : "line";
+
+  return (
+    <div className={`signal-chart${expanded ? " is-expanded" : ""}`}>
+      <div className="signal-chart-legend" aria-hidden="true">
+        {series.map((item) => (
+          <span key={item.key || item.label} style={{ "--series-color": item.color || "#2563eb" }}>{item.label}</span>
+        ))}
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${chart.title || "信号图表"}，单位${chart.unit || "数值"}`}>
+        {[0, 0.5, 1].map((ratio) => {
+          const y = padding.top + ratio * innerHeight;
+          const value = max - ratio * span;
+          return (
+            <g key={ratio}>
+              <path className="signal-chart-grid" d={`M${padding.left},${y}H${width - padding.right}`} />
+              {expanded && <text className="signal-chart-axis" x={padding.left - 8} y={y + 4} textAnchor="end">{formatAxis(value)}</text>}
+            </g>
+          );
+        })}
+        {min < 0 && max > 0 && <path className="signal-chart-zero" d={`M${padding.left},${baseline}H${width - padding.right}`} />}
+
+        {kind === "line" ? series.map((item) => {
+          const step = innerWidth / Math.max(item.points.length - 1, 1);
+          const path = item.points.map((point, index) => `${index ? "L" : "M"}${(padding.left + index * step).toFixed(2)},${yFor(point.value).toFixed(2)}`).join(" ");
+          return (
+            <g key={item.key || item.label}>
+              <path className="signal-chart-line" d={path} style={{ stroke: item.color || "#2563eb" }} />
+              {(expanded || item.points.length <= 6) && item.points.map((point, index) => (
+                <circle key={`${point.label}-${index}`} cx={padding.left + index * step} cy={yFor(point.value)} r={expanded ? 3 : 2} fill={item.color || "#2563eb"}>
+                  <title>{point.label}：{point.value} {chart.unit || ""}</title>
+                </circle>
+              ))}
+            </g>
+          );
+        }) : (() => {
+          const points = series[0].points;
+          const slot = innerWidth / Math.max(points.length, 1);
+          const barWidth = Math.min(slot * 0.58, expanded ? 72 : 42);
+          return points.map((point, index) => {
+            const x = padding.left + slot * index + (slot - barWidth) / 2;
+            const y = yFor(Math.max(point.value, 0));
+            const bottom = yFor(Math.min(point.value, 0));
+            return (
+              <g key={`${point.label}-${index}`}>
+                <rect x={x} y={Math.min(y, bottom)} width={barWidth} height={Math.max(Math.abs(bottom - y), 1)} rx="3" fill={point.color || series[0].color || "#2563eb"}>
+                  <title>{point.label}：{point.value} {chart.unit || ""}</title>
+                </rect>
+                {(expanded || points.length <= 6) && <text className="signal-chart-x-label" x={x + barWidth / 2} y={height - 7} textAnchor="middle">{labelFor(point.label)}</text>}
+              </g>
+            );
+          });
+        })()}
+
+        {kind === "line" && (() => {
+          const points = series.reduce((longest, item) => item.points.length > longest.length ? item.points : longest, []);
+          const tickCount = expanded ? Math.min(5, points.length) : Math.min(2, points.length);
+          if (!tickCount) return null;
+          const indices = Array.from(new Set(Array.from({ length: tickCount }, (_, index) => Math.round(index * (points.length - 1) / Math.max(tickCount - 1, 1)))));
+          return indices.map((pointIndex) => {
+            const x = padding.left + (pointIndex / Math.max(points.length - 1, 1)) * innerWidth;
+            return <text className="signal-chart-x-label" key={pointIndex} x={x} y={height - 7} textAnchor={pointIndex === 0 ? "start" : pointIndex === points.length - 1 ? "end" : "middle"}>{labelFor(points[pointIndex]?.label)}</text>;
+          });
+        })()}
+      </svg>
+    </div>
+  );
+}
+
+function formatSignalValue(value, valueFormat = "number") {
+  if (valueFormat === "text") return value == null || value === "" ? "—" : String(value);
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  if (valueFormat === "cny") return formatMoney(number, "CNY");
+  if (valueFormat === "pct") return `${formatNumber(number, Math.abs(number) < 0.1 ? 4 : 2)}%`;
+  if (valueFormat === "ratio") return `${formatNumber(number, 3)}×`;
+  if (valueFormat === "bp") return `${formatNumber(number, 2)} bp`;
+  if (valueFormat === "pp") return `${formatNumber(number, 2)} 个百分点`;
+  if (valueFormat === "contracts") return `${formatNumber(number, 0)} 手`;
+  if (valueFormat === "count") return formatNumber(number, 0);
+  return formatNumber(number, 2);
+}
+
+function signalToneClass(metric) {
+  const value = Number(metric?.value);
+  if (!Number.isFinite(value) || !["cny", "bp"].includes(metric?.format)) return "";
+  return value > 0 ? "is-positive" : value < 0 ? "is-negative" : "";
+}
+
+function InstitutionIndustryAllocation({ allocation = {} }) {
+  const categories = allocation.categories || [];
+  const industries = allocation.industries || [];
+  const errors = allocation.errors || [];
+
+  return (
+    <section className="institution-allocation" aria-labelledby="institution-allocation-title">
+      <div className="institution-allocation-heading">
+        <div>
+          <p className="eyebrow">机构持仓结构</p>
+          <h2 id="institution-allocation-title">各类资金的行业占比</h2>
+          <p>{allocation.basis || "各类资金已披露持仓市值内的行业占比"}</p>
+        </div>
+        {allocation.reportDate && <span className="allocation-period">主口径截至 {allocation.reportDate}</span>}
+      </div>
+
+      {!categories.length || !industries.length ? (
+        <p className="empty">机构行业占比暂未取到，市场总览仍可正常使用。</p>
+      ) : (
+        <>
+          <div className="allocation-category-grid">
+            {categories.map((category) => (
+              <article className="allocation-category-card" key={category.id}>
+                <header>
+                  <strong>{category.label}</strong>
+                  <span>{category.reportDate}</span>
+                </header>
+                <b>{formatMoney(category.totalMarketValue, "CNY")}</b>
+                <p>
+                  样本 {formatNumber(category.sampleCount, 0)}
+                  {category.totalCount && category.totalCount !== category.sampleCount ? ` / ${formatNumber(category.totalCount, 0)}` : ""}
+                </p>
+                {category.coveragePct !== null && category.coveragePct !== undefined && (
+                  <p>{category.coverageLabel} {formatPctPlain(category.coveragePct)}</p>
+                )}
+                <small>{category.note}</small>
+                <a href={category.sourceUrl} target="_blank" rel="noreferrer">
+                  {category.source} <ExternalLink size={12} aria-hidden="true" />
+                </a>
+              </article>
+            ))}
+          </div>
+
+          <div className="allocation-table-wrap">
+            <table className="allocation-table">
+              <thead>
+                <tr>
+                  <th scope="col">申万一级行业</th>
+                  {categories.map((category) => <th scope="col" key={category.id}>{category.label}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {industries.map((industry) => (
+                  <tr key={industry.name}>
+                    <th scope="row">{industry.name}</th>
+                    {categories.map((category) => {
+                      const value = industry.values?.[category.id];
+                      return (
+                        <td key={category.id}>
+                          {value ? (
+                            <div className="allocation-value" title={`${industry.name} · ${category.label}：${formatPctPlain(value.sharePct)}，${formatMoney(value.marketValue, "CNY")}`}>
+                              <span className="allocation-bar" style={{ width: `${Math.min(Number(value.sharePct) || 0, 100)}%` }} aria-hidden="true" />
+                              <strong>{formatPctPlain(value.sharePct)}</strong>
+                              <small>{formatMoney(value.marketValue, "CNY")}</small>
+                            </div>
+                          ) : (
+                            <span className="allocation-missing">—</span>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {!!errors.length && <p className="allocation-warning">部分来源本轮未取到：{errors.join("；")}</p>}
+      {!!allocation.notes?.length && (
+        <ul className="allocation-notes">
+          {allocation.notes.map((note) => <li key={note}>{note}</li>)}
+        </ul>
+      )}
+    </section>
+  );
 }
 
 
@@ -3431,10 +4582,13 @@ function GamesPageV2() {
   const [selectedProvider, setSelectedProvider] = useState("qimai");
   const [selectedCountry, setSelectedCountry] = useState("cn");
   const [newKeys, setNewKeys] = useState(new Set());
-  const [status, setStatus] = useState("正在获取游戏榜单数据...");
+  const [status, setStatus] = useState("正在获取 Sensor Tower 数据...");
+  const [rankingStatus, setRankingStatus] = useState("正在获取点点 / 七麦榜单数据...");
+  const [steamStatus, setSteamStatus] = useState("正在加载 Steam 专区数据...");
   const [refreshing, setRefreshing] = useState(false);
   const [providerAuth, setProviderAuth] = useState({ providers: [], policy: {} });
   const [providerBusy, setProviderBusy] = useState("");
+  const [gameTab, setGameTab] = useState("steam");
 
   const knownSignatures = useRef(new Map());
   const lastStatusText = useRef("");
@@ -3470,9 +4624,11 @@ function GamesPageV2() {
       const statusText = buildGamesStatusV2(data);
       lastStatusText.current = statusText;
       setStatus(statusText);
+      setRankingStatus(buildGameRankingsStatusV2(data));
       return true;
     } catch (error) {
       setStatus(`获取失败：${error.message}`);
+      setRankingStatus(`榜单数据获取失败：${error.message}`);
       return false;
     }
   }, []);
@@ -3481,7 +4637,7 @@ function GamesPageV2() {
     try {
       setProviderAuth(await getJson(`/api/games/providers/auth?t=${Date.now()}`));
     } catch (error) {
-      setStatus(`读取榜单登录状态失败：${error.message}`);
+      setRankingStatus(`读取榜单登录状态失败：${error.message}`);
     }
   }, []);
 
@@ -3498,9 +4654,9 @@ function GamesPageV2() {
     try {
       const result = await getJson(route.url, { method: route.method });
       await loadProviderAuth();
-      setStatus(result.message || (action === "login" ? "登录窗口已打开，请在窗口中手动登录。" : "登录会话已保存。"));
+      setRankingStatus(result.message || (action === "login" ? "登录窗口已打开，请在窗口中手动登录。" : "登录会话已保存。"));
     } catch (error) {
-      setStatus(`${provider === "qimai" ? "七麦" : "点点"}登录操作失败：${error.message}`);
+      setRankingStatus(`${provider === "qimai" ? "七麦" : "点点"}登录操作失败：${error.message}`);
     } finally {
       setProviderBusy("");
     }
@@ -3509,7 +4665,7 @@ function GamesPageV2() {
   const crawlProvider = useCallback(async (provider) => {
     const countryCode = selectedCountry || "cn";
     setProviderBusy(`${provider}:crawl`);
-    setStatus(`正在低频采集${provider === "qimai" ? "七麦" : "点点"} ${countryCode.toUpperCase()} 免费榜和畅销榜...`);
+    setRankingStatus(`正在低频采集${provider === "qimai" ? "七麦" : "点点"} ${countryCode.toUpperCase()} 免费榜和畅销榜...`);
     try {
       const result = await getJson(`/api/games/providers/${provider}/crawl?country_code=${encodeURIComponent(countryCode)}`, {
         method: "POST",
@@ -3518,11 +4674,12 @@ function GamesPageV2() {
         setGameData(result.games);
         knownSignatures.current = collectGameDashboardSignatures(result.games);
         lastStatusText.current = buildGamesStatusV2(result.games);
+        setRankingStatus(buildGameRankingsStatusV2(result.games));
       }
       await loadProviderAuth();
-      setStatus(result.message || "榜单采集完成。");
+      setRankingStatus(result.message || "榜单采集完成。");
     } catch (error) {
-      setStatus(`榜单采集已停止：${error.message}`);
+      setRankingStatus(`榜单采集已停止：${error.message}`);
     } finally {
       setProviderBusy("");
     }
@@ -3531,20 +4688,22 @@ function GamesPageV2() {
   const providerLoginPending = (providerAuth.providers || []).some((item) => ["starting", "login_open"].includes(item.status));
 
   const requestBackgroundRefresh = useBackgroundRefresh("games", refreshing, setRefreshing, setStatus, lastStatusText);
-  useRefreshPolling("games", loadGames, setRefreshing, setStatus, lastStatusText, lastRefreshFinishedAt);
+  useRefreshPolling("games", loadGames, setRefreshing, setStatus, lastStatusText, lastRefreshFinishedAt, gameTab === "sensorTower");
 
   useEffect(() => {
+    if (gameTab !== "sensorTower" && gameTab !== "rankings") return undefined;
     loadGames({ markNew: false });
-    loadProviderAuth();
+    if (gameTab === "rankings") loadProviderAuth();
+    if (gameTab !== "sensorTower") return undefined;
     const autoTimer = window.setInterval(() => requestBackgroundRefresh("timer", { force: false }), AUTO_REFRESH_MS);
     return () => window.clearInterval(autoTimer);
-  }, [loadGames, loadProviderAuth, requestBackgroundRefresh]);
+  }, [gameTab, loadGames, loadProviderAuth, requestBackgroundRefresh]);
 
   useEffect(() => {
-    if (!providerLoginPending) return undefined;
+    if (gameTab !== "rankings" || !providerLoginPending) return undefined;
     const timer = window.setInterval(loadProviderAuth, 2000);
     return () => window.clearInterval(timer);
-  }, [loadProviderAuth, providerLoginPending]);
+  }, [gameTab, loadProviderAuth, providerLoginPending]);
 
   const markets = gameData.markets || [];
   const rankProviders = gameData.rankProviders || [];
@@ -3553,67 +4712,334 @@ function GamesPageV2() {
   const selectedProviderCountry =
     (selectedRankProvider.countries || []).find((country) => country.code === selectedCountry) || selectedRankProvider.countries?.[0] || {};
   const summary = gameData.summary || {};
+  const sensorStatuses = (gameData.providerStatus || []).filter((item) => ["reported_revenue", "sensor_tower"].includes(item.id));
+  const rankingStatuses = (gameData.providerStatus || []).filter((item) => ["qimai", "diandian"].includes(item.id));
+  const pageMeta = {
+    steam: {
+      eyebrow: "Steam 热销榜 / Steam API / SteamCharts",
+      title: "Steam 游戏专区",
+      status: steamStatus,
+    },
+    sensorTower: {
+      eyebrow: "Sensor Tower 预估流水 / 官方与媒体披露",
+      title: "Sensor Tower 游戏专区",
+      status,
+    },
+    rankings: {
+      eyebrow: "点点榜单 / 七麦榜单",
+      title: "游戏国家榜专区",
+      status: rankingStatus,
+    },
+    import: {
+      eyebrow: "本地 CSV / JSON",
+      title: "游戏数据导入",
+      status: "数据导入功能即将上线。",
+    },
+  }[gameTab];
   return (
     <PageShell
-      eyebrow="Sensor Tower 流水 / 点点榜单 / 七麦榜单"
-      title="全球与中国游戏 Top100"
+      eyebrow={pageMeta.eyebrow}
+      title={pageMeta.title}
       activePage="games"
-      status={status}
-      actions={<RefreshButton loading={refreshing} title="刷新游戏榜单" onClick={requestBackgroundRefresh} />}
+      status={pageMeta.status}
+      actions={gameTab === "sensorTower" ? <RefreshButton loading={refreshing} title="刷新 Sensor Tower 数据" onClick={requestBackgroundRefresh} /> : null}
     >
-      <section className="game-overview" aria-label="游戏数据概览">
-        <Kpi label="全球 Top100" value={`${summary.globalTopCount || 0}/${summary.rankLimit || 100}`} />
-        <Kpi label="中国 Top100" value={`${summary.chinaTopCount || 0}/${summary.rankLimit || 100}`} />
-        <Kpi label="披露流水" value={`${summary.reportedRevenueRows || 0} 条`} />
-        <Kpi label="ST 兜底" value={`${summary.sensorTowerRevenueRows || 0} 条`} />
-        <Kpi label="30国榜单" value={`${summary.rankingRows || 0} 条`} />
-      </section>
-
-      <GameProviderStatusGridV2
-        statuses={gameData.providerStatus || []}
-        authStates={providerAuth.providers || []}
-        policy={providerAuth.policy || {}}
-        selectedCountry={selectedProviderCountry}
-        busy={providerBusy}
-        onLogin={(provider) => runProviderLoginAction(provider, "login")}
-        onCancel={(provider) => runProviderLoginAction(provider, "cancel")}
-        onCrawl={crawlProvider}
-      />
-
-      <GameMarketTablesV2 markets={markets} newKeys={newKeys} />
-
-      <section className="game-controls" aria-label="国家榜筛选">
-        <div className="game-provider-tabs" role="tablist" aria-label="榜单来源">
-          {rankProviders.map((provider) => (
-            <button
-              key={provider.id}
-              className={provider.id === selectedRankProvider.id ? "active" : ""}
-              type="button"
-              onClick={() => setSelectedProvider(provider.id)}
-            >
-              {provider.name}
-            </button>
-          ))}
-        </div>
-        <label className="select-control">
-          <span>消费能力前30国家/地区</span>
-          <select value={selectedProviderCountry.code || ""} onChange={(event) => setSelectedCountry(event.target.value)}>
-            {countries.map((country) => (
-              <option key={country.code} value={country.code}>
-                {country.marketRank ? `${country.marketRank}. ` : ""}
-                {country.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="game-month-meta">
-          <strong>{selectedRankProvider.name || "点点/七麦榜单"}</strong>
-          <span>{summarizeProviderCountryV2(selectedProviderCountry)}</span>
-        </div>
-      </section>
-
-      <GameProviderRankingsV2 provider={selectedRankProvider} country={selectedProviderCountry} newKeys={newKeys} />
+      <div className="game-subtabs" role="tablist" aria-label="游戏功能">
+        <button type="button" className={gameTab === "steam" ? "is-active" : ""} onClick={() => setGameTab("steam")}><strong>Steam 专区</strong><span>热销榜 / 在线人数趋势</span></button>
+        <button type="button" className={gameTab === "sensorTower" ? "is-active" : ""} onClick={() => setGameTab("sensorTower")}><strong>Sensor Tower 专区</strong><span>Top100 预估流水</span></button>
+        <button type="button" className={gameTab === "rankings" ? "is-active" : ""} onClick={() => setGameTab("rankings")}><strong>榜单</strong><span>点点 / 七麦国家榜</span></button>
+        <button type="button" className={gameTab === "import" ? "is-active" : ""} onClick={() => setGameTab("import")}><strong>数据导入</strong><span>即将上线</span></button>
+      </div>
+      {gameTab === "steam" && <GameRegionTab onStatusChange={setSteamStatus} />}
+      {gameTab === "import" && (
+        <section className="game-placeholder">
+          <h2>数据导入</h2>
+          <p>游戏流水 / 榜单的本地 CSV / JSON 导入入口，即将上线。当前可继续在「Sensor Tower 专区」「榜单」中使用现有导入能力。</p>
+        </section>
+      )}
+      {gameTab === "sensorTower" && (
+        <>
+          <section className="game-overview" aria-label="Sensor Tower 数据概览">
+            <Kpi label="全球 Top100" value={`${summary.globalTopCount || 0}/${summary.rankLimit || 100}`} />
+            <Kpi label="中国 Top100" value={`${summary.chinaTopCount || 0}/${summary.rankLimit || 100}`} />
+            <Kpi label="官方/媒体披露" value={`${summary.reportedRevenueRows || 0} 条`} />
+            <Kpi label="Sensor Tower 估算" value={`${summary.sensorTowerRevenueRows || 0} 条`} />
+          </section>
+          <GameProviderStatusGridV2
+            statuses={sensorStatuses}
+            authStates={[]}
+            policy={{}}
+            selectedCountry={{}}
+            busy=""
+            onLogin={() => {}}
+            onCancel={() => {}}
+            onCrawl={() => {}}
+          />
+          <GameMarketTablesV2 markets={markets} newKeys={newKeys} showRankings={false} />
+        </>
+      )}
+      {gameTab === "rankings" && (
+        <>
+          <section className="game-overview" aria-label="点点与七麦榜单概览">
+            <Kpi label="国家/地区" value={countries.length || 0} />
+            <Kpi label="榜单记录" value={`${summary.rankingRows || 0} 条`} />
+            <Kpi label="榜单来源" value={`${rankProviders.length}/2`} />
+          </section>
+          <GameProviderStatusGridV2
+            statuses={rankingStatuses}
+            authStates={providerAuth.providers || []}
+            policy={providerAuth.policy || {}}
+            selectedCountry={selectedProviderCountry}
+            busy={providerBusy}
+            onLogin={(provider) => runProviderLoginAction(provider, "login")}
+            onCancel={(provider) => runProviderLoginAction(provider, "cancel")}
+            onCrawl={crawlProvider}
+          />
+          <section className="game-controls" aria-label="国家榜筛选">
+            <div className="game-provider-tabs" role="tablist" aria-label="榜单来源">
+              {rankProviders.map((provider) => (
+                <button
+                  key={provider.id}
+                  className={provider.id === selectedRankProvider.id ? "active" : ""}
+                  type="button"
+                  onClick={() => setSelectedProvider(provider.id)}
+                >
+                  {provider.name}
+                </button>
+              ))}
+            </div>
+            <label className="select-control">
+              <span>消费能力前30国家/地区</span>
+              <select value={selectedProviderCountry.code || ""} onChange={(event) => setSelectedCountry(event.target.value)}>
+                {countries.map((country) => (
+                  <option key={country.code} value={country.code}>
+                    {country.marketRank ? `${country.marketRank}. ` : ""}
+                    {country.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="game-month-meta">
+              <strong>{selectedRankProvider.name || "点点/七麦榜单"}</strong>
+              <span>{summarizeProviderCountryV2(selectedProviderCountry)}</span>
+            </div>
+          </section>
+          <GameProviderRankingsV2 provider={selectedRankProvider} country={selectedProviderCountry} newKeys={newKeys} />
+        </>
+      )}
     </PageShell>
+  );
+}
+
+function fmtInt(value) {
+  if (value == null) return "—";
+  return value.toLocaleString("en-US");
+}
+
+function GameRegionTab({ onStatusChange }) {
+  const [data, setData] = useState({ regions: [], games: [] });
+  const [cc, setCc] = useState("global");
+  const [refreshing, setRefreshing] = useState(false);
+
+  const reportStatus = useCallback((message) => {
+    onStatusChange?.(message);
+  }, [onStatusChange]);
+
+  const load = useCallback(async (region, force) => {
+    reportStatus(force ? "正在刷新 Steam 专区数据..." : "正在加载 Steam 专区数据...");
+    setRefreshing(true);
+    try {
+      const result = await getJson(`/api/games/region?cc=${encodeURIComponent(region)}${force ? "&refresh=true" : ""}&t=${Date.now()}`);
+      setData(result);
+      reportStatus(`Steam 专区：${result.regionName || region}；共 ${result.games?.length || 0} 款；${result.stale ? "数据偏旧，已回退上次快照。" : "已更新。"}`);
+    } catch (error) {
+      reportStatus(`Steam 专区获取失败：${error.message}`);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [reportStatus]);
+
+  useEffect(() => {
+    load(cc, false);
+  }, [cc, load]);
+
+  const regions = data.regions || [];
+  const games = data.games || [];
+  const ranked = games.filter((game) => game.rank != null);
+  const totalCurrent = games.reduce((sum, game) => sum + (game.currentPlayers || 0), 0);
+  const withData = games.filter((game) => game.currentPlayers != null || (game.monthly && game.monthly.length)).length;
+
+  return (
+    <section className="game-region" aria-label="游戏区域看板">
+      <section className="region-selector" aria-label="选择地区">
+        {regions.map((region) => (
+          <button
+            key={region.code}
+            type="button"
+            className={region.code === cc ? "is-active" : ""}
+            onClick={() => setCc(region.code)}
+          >
+            {region.name}
+          </button>
+        ))}
+        <button type="button" className="secondary-action region-refresh" disabled={refreshing} onClick={() => load(cc, true)}>
+          {refreshing ? "刷新中..." : "刷新"}
+        </button>
+      </section>
+
+      <section className="game-overview">
+        <Kpi label="实时在线合计" value={fmtInt(totalCurrent)} />
+        <Kpi label="有数据游戏" value={`${withData}/${games.length}`} />
+        <Kpi label="进入热销榜" value={`${ranked.length}/${games.length}`} />
+        <Kpi label="当前地区" value={data.regionName || cc} />
+      </section>
+
+      <div className="region-grid">
+        <div className="region-panel">
+          <div className="section-title compact">
+            <h2>{data.regionName || cc} · 热销榜（Steam）</h2>
+          </div>
+          <div className="stock-table-wrap">
+            <table className="stock-table game-region-table">
+              <thead>
+                <tr>
+                  <th>排名</th>
+                  <th>游戏</th>
+                  <th>厂商</th>
+                  <th>实时在线</th>
+                  <th>峰值</th>
+                  <th>近月均值</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!games.length ? (
+                  <tr>
+                    <td colSpan="6" className="table-empty">暂无数据</td>
+                  </tr>
+                ) : (
+                  games.map((game) => {
+                    const last = game.monthly && game.monthly.length ? game.monthly[game.monthly.length - 1] : null;
+                    return (
+                      <tr key={game.appId ?? game.name}>
+                        <td>{game.rank != null ? game.rank : "—"}</td>
+                        <td>
+                          <strong>{game.nameZh || game.name}</strong>
+                          <small>{game.name}</small>
+                        </td>
+                        <td>{game.publisher}</td>
+                        <td>{fmtInt(game.currentPlayers)}</td>
+                        <td>{fmtInt(game.peakPlayers)}</td>
+                        <td>{last && last.avg != null ? fmtInt(last.avg) : "—"}</td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="region-panel">
+          <div className="section-title compact">
+            <h2>在线人数趋势（全球并发 · Steam）</h2>
+          </div>
+          <RegionCcuChart games={games} />
+        </div>
+      </div>
+
+      {data.errors && data.errors.length > 0 && (
+        <details className="region-errors">
+          <summary>数据获取警告（{data.errors.length}）</summary>
+          <ul>{data.errors.map((message, index) => <li key={index}>{message}</li>)}</ul>
+        </details>
+      )}
+      <p className="region-note">{data.cadence}</p>
+    </section>
+  );
+}
+
+function RegionCcuChart({ games }) {
+  const [hidden, setHidden] = useState(() => new Set());
+  const hasSeries = games.filter((game) => game.monthly && game.monthly.length);
+  const visible = hasSeries.filter((game) => !hidden.has(game.appId ?? game.name));
+
+  const monthSet = new Set();
+  visible.forEach((game) => (game.monthly || []).forEach((point) => monthSet.add(point.month)));
+  const months = Array.from(monthSet).sort();
+
+  const W = 660;
+  const H = 320;
+  const padL = 58;
+  const padR = 16;
+  const padT = 16;
+  const padB = 40;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+
+  let maxVal = 0;
+  visible.forEach((game) => (game.monthly || []).forEach((point) => {
+    if ((point.avg || 0) > maxVal) maxVal = point.avg;
+  }));
+  maxVal = maxVal || 1;
+
+  const xOf = (index) => padL + (months.length <= 1 ? innerW / 2 : (index / (months.length - 1)) * innerW);
+  const yOf = (value) => padT + innerH - (value / maxVal) * innerH;
+
+  const colors = [
+    "#e5484d", "#0091ff", "#30a46c", "#f76808", "#8e4ec6", "#e93d82",
+    "#0c8599", "#6741d9", "#a16207", "#c2255c", "#1f7a5c", "#b8860b",
+  ];
+
+  const toggle = (appId) => {
+    setHidden((previous) => {
+      const nextHidden = new Set(previous);
+      if (nextHidden.has(appId)) nextHidden.delete(appId);
+      else nextHidden.add(appId);
+      return nextHidden;
+    });
+  };
+
+  return (
+    <div className="region-ccu">
+      <svg viewBox={`0 0 ${W} ${H}`} className="region-ccu-svg" role="img" aria-label="在线人数趋势">
+        {[0, 0.25, 0.5, 0.75, 1].map((t) => {
+          const y = padT + innerH - t * innerH;
+          const value = Math.round(maxVal * t);
+          return (
+            <g key={t}>
+              <line x1={padL} y1={y} x2={W - padR} y2={y} className="ccu-grid" />
+              <text x={padL - 6} y={y + 4} className="ccu-axis ccu-y">{fmtInt(value)}</text>
+            </g>
+          );
+        })}
+        {months.map((month, index) => (
+          <text key={month} x={xOf(index)} y={H - padB + 18} className="ccu-axis ccu-x">{month.slice(2)}</text>
+        ))}
+        {visible.map((game, index) => {
+          const points = (game.monthly || [])
+            .filter((point) => monthSet.has(point.month))
+            .map((point) => {
+              const i = months.indexOf(point.month);
+              return `${xOf(i).toFixed(1)},${yOf(point.avg || 0).toFixed(1)}`;
+            })
+            .join(" ");
+          return <polyline key={game.appId ?? game.name} points={points} fill="none" stroke={colors[index % colors.length]} className="ccu-line" />;
+        })}
+      </svg>
+      <div className="region-legend">
+        {hasSeries.map((game, index) => (
+          <button
+            key={game.appId ?? game.name}
+            type="button"
+            className={hidden.has(game.appId ?? game.name) ? "off" : ""}
+            onClick={() => toggle(game.appId ?? game.name)}
+          >
+            <span className="swatch" style={{ background: colors[index % colors.length] }} />
+            {game.nameZh || game.name}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -3692,17 +5118,17 @@ function providerAuthLabelV2(status) {
   return labels[status] || "状态未知";
 }
 
-function GameMarketTablesV2({ markets, newKeys }) {
+function GameMarketTablesV2({ markets, newKeys, showRankings = true }) {
   return (
     <section className="game-market-grid" aria-label="全球与中国游戏Top100">
       {markets.map((market) => (
-        <GameTop100TableV2 key={market.id} market={market} newKeys={newKeys} />
+        <GameTop100TableV2 key={market.id} market={market} newKeys={newKeys} showRankings={showRankings} />
       ))}
     </section>
   );
 }
 
-function GameTop100TableV2({ market, newKeys }) {
+function GameTop100TableV2({ market, newKeys, showRankings = true }) {
   const rows = market?.top100 || [];
 
   return (
@@ -3721,14 +5147,14 @@ function GameTop100TableV2({ market, newKeys }) {
               <th>排名</th>
               <th>游戏</th>
               <th>采用流水</th>
-              <th>七麦榜单</th>
-              <th>点点榜单</th>
+              {showRankings && <th>七麦榜单</th>}
+              {showRankings && <th>点点榜单</th>}
             </tr>
           </thead>
           <tbody>
             {!rows.length ? (
               <tr>
-                <td colSpan="5" className="table-empty">
+                <td colSpan={showRankings ? 5 : 3} className="table-empty">
                   待导入官方/媒体披露流水或 Sensor Tower 兜底流水数据
                 </td>
               </tr>
@@ -3758,8 +5184,8 @@ function GameTop100TableV2({ market, newKeys }) {
                     <small>{formatRevenueSourceV2(row)}</small>
                     {row.downloads && <small>下载 {formatDownloads(row.downloads)}</small>}
                   </td>
-                  <RankSnapshotCellV2 rankings={row.rankings?.qimai} />
-                  <RankSnapshotCellV2 rankings={row.rankings?.diandian} />
+                  {showRankings && <RankSnapshotCellV2 rankings={row.rankings?.qimai} />}
+                  {showRankings && <RankSnapshotCellV2 rankings={row.rankings?.diandian} />}
                 </tr>
               ))
             )}
@@ -4081,8 +5507,9 @@ function useBackgroundRefresh(kind, refreshing, setRefreshing, setStatus, lastSt
   );
 }
 
-function useRefreshPolling(kind, loadData, setRefreshing, setStatus, lastStatusText, lastRefreshFinishedAt) {
+function useRefreshPolling(kind, loadData, setRefreshing, setStatus, lastStatusText, lastRefreshFinishedAt, enabled = true) {
   const pollRefreshStatus = useCallback(async () => {
+    if (!enabled) return;
     try {
       const statusData = await getJson(`/api/refresh-status?t=${Date.now()}`);
       const refresh = statusData[kind];
@@ -4114,13 +5541,14 @@ function useRefreshPolling(kind, loadData, setRefreshing, setStatus, lastStatusT
     } catch {
       // Keep the current snapshot on transient polling failures.
     }
-  }, [kind, lastRefreshFinishedAt, lastStatusText, loadData, setRefreshing, setStatus]);
+  }, [enabled, kind, lastRefreshFinishedAt, lastStatusText, loadData, setRefreshing, setStatus]);
 
   useEffect(() => {
+    if (!enabled) return undefined;
     const statusTimer = window.setInterval(pollRefreshStatus, STATUS_POLL_MS);
     pollRefreshStatus();
     return () => window.clearInterval(statusTimer);
-  }, [pollRefreshStatus]);
+  }, [enabled, pollRefreshStatus]);
 }
 
 function TrendSparkline({ item }) {
@@ -4376,10 +5804,17 @@ function buildMacroStatus(data) {
 function buildGamesStatusV2(data) {
   const summary = data.summary || {};
   const usableStatuses = new Set(["imported", "public_fallback", "credentials_present"]);
-  const statusCount = (data.providerStatus || []).filter((item) => usableStatuses.has(item.status)).length;
-  const statusTotal = (data.providerStatus || []).length || 4;
-  const count = `；全球Top100 ${summary.globalTopCount || 0}款；中国Top100 ${summary.chinaTopCount || 0}款；披露流水${summary.reportedRevenueRows || 0}条；30国榜单${summary.rankingRows || 0}条；已接入${statusCount}/${statusTotal}个来源`;
-  return `${buildGenericStatus(data, data.source || "官方/媒体流水 / Sensor Tower / 点点数据 / 七麦数据")}${count}`;
+  const sources = (data.providerStatus || []).filter((item) => ["reported_revenue", "sensor_tower"].includes(item.id));
+  const statusCount = sources.filter((item) => usableStatuses.has(item.status)).length;
+  const count = `；全球Top100 ${summary.globalTopCount || 0}款；中国Top100 ${summary.chinaTopCount || 0}款；披露流水${summary.reportedRevenueRows || 0}条；Sensor Tower ${summary.sensorTowerRevenueRows || 0}条；已接入${statusCount}/${sources.length || 2}个来源`;
+  return `${buildGenericStatus(data, "官方/媒体披露流水 / Sensor Tower 预估流水")}${count}`;
+}
+
+function buildGameRankingsStatusV2(data) {
+  const summary = data.summary || {};
+  const providers = (data.providerStatus || []).filter((item) => ["qimai", "diandian"].includes(item.id));
+  const connected = providers.filter((item) => item.status === "imported").length;
+  return `点点 / 七麦国家榜：${summary.rankingRows || 0} 条；已接入 ${connected}/${providers.length || 2} 个来源`;
 }
 
 function buildXueqiuStatus(data) {

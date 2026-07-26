@@ -18,10 +18,11 @@ from .game_provider_service import (
     get_game_provider_auth_states,
     start_game_provider_login,
 )
+from .game_region_service import get_region_games
 from .game_service import get_games
 from .macro_service import get_macro
 from .news_service import get_news, render_markdown
-from .stock_service import get_stocks
+from .stock_service import get_industry_financing_group, get_stocks
 from .watchlist_service import delete_stock_from_watchlist, get_stock_watch_detail, get_stock_watchlist, import_stock_to_watchlist, update_stock_watchlist_item
 from .xueqiu_research_service import (
     cancel_research_job,
@@ -69,6 +70,14 @@ async def api_ai_projects(refresh: bool = False) -> dict:
 @app.get("/api/stocks")
 async def api_stocks(refresh: bool = False) -> dict:
     return await get_stocks(refresh=refresh)
+
+
+@app.get("/api/stocks/industry-financing/{industry}")
+async def api_industry_financing_group(industry: str, refresh: bool = False) -> dict:
+    try:
+        return await get_industry_financing_group(industry, refresh=refresh)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.get("/api/stock-watchlist")
@@ -132,6 +141,11 @@ async def api_macro(refresh: bool = False) -> dict:
 @app.get("/api/games")
 async def api_games(refresh: bool = False) -> dict:
     return await get_games(refresh=refresh)
+
+
+@app.get("/api/games/region")
+async def api_games_region(cc: str = "global", refresh: bool = False) -> dict:
+    return await get_region_games(cc=cc, refresh=refresh)
 
 
 @app.get("/api/games/providers/auth")

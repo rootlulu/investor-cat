@@ -51,7 +51,7 @@ trap cleanup EXIT INT TERM
 
 echo
 echo "Starting backend: http://localhost:${API_PORT}"
-"$PYTHON" -m uvicorn src.app:app --host "$HOST" --port "$API_PORT" &
+"$PYTHON" -m uvicorn src.app:app --host "$HOST" --port "$API_PORT" --reload &
 API_PID="$!"
 
 sleep 1

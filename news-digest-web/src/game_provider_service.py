@@ -15,6 +15,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from . import browser_service as bs
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 PROFILE_ROOT = ROOT_DIR / "data" / "game-provider-profiles"
@@ -737,12 +738,7 @@ def set_auth_session_error(session: dict[str, Any], message: str, error: Excepti
 
 
 def apply_browser_library_path() -> None:
-    if not PLAYWRIGHT_LIBRARY_DIR.exists():
-        return
-    current = [item for item in clean_text(os.getenv("LD_LIBRARY_PATH")).split(":") if item]
-    library = str(PLAYWRIGHT_LIBRARY_DIR)
-    if library not in current:
-        os.environ["LD_LIBRARY_PATH"] = ":".join([library, *current])
+    bs.apply_browser_library_path(PLAYWRIGHT_LIBRARY_DIR)
 
 
 def load_state() -> dict[str, Any]:
@@ -790,9 +786,4 @@ def is_risk_error(message: str) -> bool:
 
 
 def summarize_browser_error(error: Exception) -> str:
-    message = clean_text(error)
-    if "ProcessSingleton" in message or "SingletonLock" in message:
-        return "浏览器 profile 正被登录窗口占用，请先点击登录完成。"
-    if "Executable doesn't exist" in message:
-        return "没有找到 Playwright Chromium。"
-    return f"{message[:220]}..." if len(message) > 220 else message
+    return bs.summarize_browser_error(error)

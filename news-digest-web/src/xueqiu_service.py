@@ -17,6 +17,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from . import browser_service as bs
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 XUEQIU_CONFIG_PATH = ROOT_DIR / "config" / "xueqiu_influencers.json"
 XUEQIU_SETTINGS_PATH = ROOT_DIR / "config" / "xueqiu_settings.json"
@@ -101,10 +103,13 @@ class XueqiuApiError(RuntimeError):
 
 async def get_xueqiu(refresh: bool = False, allow_stale: bool = True, force: bool = False) -> dict[str, Any]:
     async with XUEQIU_LOCK:
-        if not refresh and XUEQIU_CACHE["data"] and time.time() < XUEQIU_CACHE["expires_at"]:
+        if not refresh and XUEQIU_CACHE["data"]:
             data = dict(XUEQIU_CACHE["data"])
-            data["cached"] = True
-            return data
+            stale = time.time() >= XUEQIU_CACHE["expires_at"]
+            if allow_stale or not stale:
+                data["cached"] = True
+                data["stale"] = stale
+                return data
 
     if not refresh:
         return build_xueqiu_snapshot()
@@ -855,37 +860,29 @@ def fetch_xueqiu_json_with_browser_sync(url: str, params: dict[str, Any] | None 
         with xueqiu_browser_profile_lock(profile_dir, lock_timeout_ms):
             cleanup_stale_chromium_profile_locks(profile_dir)
             wait_for_chromium_profile_release(profile_dir, lock_timeout_ms)
-            with sync_playwright() as playwright:
-                return fetch_xueqiu_json_with_browser_context(playwright, profile_dir, api_url, timeout_ms, wait_ms)
+            return fetch_xueqiu_json_with_browser_context(profile_dir, api_url, timeout_ms, wait_ms)
     except XueqiuApiError:
         raise
     except Exception as error:
         raise XueqiuApiError(f"浏览器抓取失败：{summarize_browser_error(error)}") from error
 
 
-def fetch_xueqiu_json_with_browser_context(playwright: Any, profile_dir: Path, api_url: str, timeout_ms: int, wait_ms: int) -> dict[str, Any]:
+def fetch_xueqiu_json_with_browser_context(profile_dir: Path, api_url: str, timeout_ms: int, wait_ms: int) -> dict[str, Any]:
     try:
         headless = xueqiu_browser_headless()
-        launch_options: dict[str, Any] = {
-            "headless": headless,
-            "channel": xueqiu_config_text("browser.channel", "chromium"),
-            "viewport": {"width": 1280, "height": 900},
-            "locale": "zh-CN",
-            "timezone_id": "Asia/Shanghai",
-            "user_agent": xueqiu_config_text("request.userAgent", XUEQIU_USER_AGENT),
-            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
-        }
-        executable_path = xueqiu_config_text("browser.executable", "")
-        if executable_path:
-            launch_options["executable_path"] = executable_path
-
-        context = playwright.chromium.launch_persistent_context(str(profile_dir), **launch_options)
-        try:
-            context.set_default_timeout(timeout_ms)
-            context.set_extra_http_headers({
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                "X-Requested-With": "XMLHttpRequest",
-            })
+        with bs.launch_browser_context(
+            headless=headless,
+            channel=xueqiu_config_text("browser.channel", "chromium"),
+            viewport={"width": 1280, "height": 900},
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            user_agent=xueqiu_config_text("request.userAgent", XUEQIU_USER_AGENT),
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            executable=xueqiu_config_text("browser.executable", ""),
+            profile_dir=str(profile_dir),
+            timeout_ms=timeout_ms,
+        ) as context:
+            context.set_extra_http_headers({"X-Requested-With": "XMLHttpRequest"})
             add_cookie_header_to_browser_context(context, get_manual_xueqiu_cookie_header())
             if headless:
                 payload = fetch_xueqiu_json_with_browser_request_once(context, api_url, timeout_ms)
@@ -895,8 +892,6 @@ def fetch_xueqiu_json_with_browser_context(playwright: Any, profile_dir: Path, a
                 payload = fetch_xueqiu_json_with_browser_page(page, api_url, timeout_ms, wait_ms)
             cache_xueqiu_browser_cookies(context.cookies([XUEQIU_HOME_URL]))
             return payload
-        finally:
-            context.close()
     except XueqiuApiError:
         raise
     except Exception as error:
@@ -1171,21 +1166,16 @@ def summarize_browser_error(error: Any) -> str:
     message = normalize_error(error)
     if message.startswith("浏览器抓取失败："):
         message = message.split("：", 1)[1]
-    if "需要可交互浏览器" in message or "已打开浏览器等待" in message:
-        return "雪球需要可交互浏览器登录/滑块验证；请用 config/xueqiu_settings.json: browser.headless=false 启动服务后刷新，或配置 config/xueqiu_settings.json: auth.cookie or auth.cookieFile。"
-    if "libnspr4.so" in message or "libnss3.so" in message or "libasound.so.2" in message:
-        return "Chromium 缺少运行库；请运行 Playwright 依赖安装，或配置 browser.libraryPath。"
-    if "ProcessSingleton" in message or "SingletonLock" in message:
-        return "浏览器 profile 被其他 Chromium 进程占用，请稍后重试。"
-    if "BROWSER_FETCH_ERROR:AbortError" in message or "Timeout" in message:
-        return "浏览器 API 请求超时；通常需要可用登录态、手动滑动验证一次，或配置 config/xueqiu_settings.json: auth.cookie or auth.cookieFile。"
-    if "ERR_CONNECTION_CLOSED" in message:
-        return "雪球主动断开了浏览器连接，通常需要可用登录态；请配置 config/xueqiu_settings.json: auth.cookie or auth.cookieFile 或用非 headless 浏览器登录一次。"
-    if "Executable doesn't exist" in message or "executable doesn't exist" in message or "does not support chromium" in message:
-        return "没有找到 Playwright Chromium，请运行 python -m playwright install chromium。"
-    if len(message) > 220:
-        return f"{message[:220]}..."
-    return message
+    return bs.summarize_browser_error(
+        message,
+        interactive_login_hint=_XUEQIU_INTERACTIVE_LOGIN_HINT,
+    )
+
+
+_XUEQIU_INTERACTIVE_LOGIN_HINT = (
+    "雪球需要可交互浏览器登录/滑块验证；请用 config/xueqiu_settings.json: browser.headless=false "
+    "启动服务后刷新，或配置 config/xueqiu_settings.json: auth.cookie or auth.cookieFile。"
+)
 
 def build_url(url: str, params: dict[str, Any] | None = None) -> str:
     if not params:
@@ -1208,10 +1198,7 @@ def is_retryable_xueqiu_error(error: Exception) -> bool:
 
 
 def is_xueqiu_risk_control_page(text: str) -> bool:
-    if not text:
-        return True
-    head = text[:5000]
-    return text.startswith("<") or "aliyun_waf" in head or "_waf_" in head or "滑动验证" in head or "访问验证" in head
+    return bs.is_risk_control_page(text)
 
 
 def xueqiu_risk_control_message(text: str) -> str:
@@ -1241,13 +1228,7 @@ def xueqiu_browser_headless() -> bool:
 
 def apply_xueqiu_browser_library_path() -> None:
     lib_dir = xueqiu_config_path("browser.libraryPath", XUEQIU_BROWSER_LIBRARY_DIR)
-    if not lib_dir.exists():
-        return
-    current_paths = [path for path in normalize_text(os.getenv("LD_LIBRARY_PATH")).split(":") if path]
-    lib_path = str(lib_dir)
-    if lib_path in current_paths:
-        return
-    os.environ["LD_LIBRARY_PATH"] = ":".join([lib_path, *current_paths])
+    bs.apply_browser_library_path(lib_dir)
 
 
 def get_xueqiu_cookie_header() -> str:

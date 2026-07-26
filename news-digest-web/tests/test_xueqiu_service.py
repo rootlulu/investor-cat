@@ -1,7 +1,36 @@
+import time
 import unittest
 from unittest.mock import patch
 
-from src.xueqiu_service import normalize_xueqiu_avatar_url, search_user_profiles_sync
+from src.xueqiu_service import XUEQIU_CACHE, get_xueqiu, normalize_xueqiu_avatar_url, search_user_profiles_sync
+
+
+class XueqiuSnapshotCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def test_expired_cache_keeps_last_refreshed_activities_visible(self) -> None:
+        previous_cache = dict(XUEQIU_CACHE)
+        refreshed_activity = {"id": "activity-1", "text": "启动刷新抓到的动态"}
+        XUEQIU_CACHE.update(
+            {
+                "expires_at": time.time() - 1,
+                "data": {
+                    "generatedAt": "2026-07-25T13:38:18+00:00",
+                    "activities": [refreshed_activity],
+                    "hasData": True,
+                },
+            }
+        )
+
+        try:
+            with patch("src.xueqiu_service.build_xueqiu_snapshot") as build_empty_snapshot:
+                data = await get_xueqiu()
+        finally:
+            XUEQIU_CACHE.clear()
+            XUEQIU_CACHE.update(previous_cache)
+
+        self.assertEqual(data["activities"], [refreshed_activity])
+        self.assertTrue(data["cached"])
+        self.assertTrue(data["stale"])
+        build_empty_snapshot.assert_not_called()
 
 
 class XueqiuUserSearchTests(unittest.TestCase):
