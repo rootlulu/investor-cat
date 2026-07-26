@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 资讯 | `/news` | 最近一周中国及港澳新闻、世界重要新闻，支持 Markdown 输出 |
 | AI | `/ai` | 最近 7 天 AI 中文新闻分类浏览，以及按用途分为 5 类、每类 Stars Top 30 的 GitHub AI 生产力项目；智能体覆盖编程、写作、研究和浏览器操作等用途 |
-| 股票 | `/stocks`、`/stocks/{stock_id}` | A股、港股、美股市场流动性与估值，滚动近三年行业融资累计净买入趋势，自选股详情、新闻、公告、评级、资金流、社区热帖 |
+| 股票 | `/stocks`、`/stocks?tab=watchlist`、`/stocks/{stock_id}` | “大盘”展示 A股、港股、美股总体数据与近三年行业融资趋势；“个股”展示自选股及详情、新闻、公告、评级、资金流、社区热帖 |
 | 大宗 | `/commodities` | 现货、期货、升贴水、库存和跨市场价差 |
 | 能源 | `/energy` | 国家统计局口径的煤炭、天然气、电力等能源生产指标 |
 | 消费 | `/consumption` | 社零、线上线下消费、汽车、地产相关消费和进口需求观察 |
@@ -230,7 +230,7 @@ sudo apt install python3.14-venv
 config/stock_watchlist.json
 ```
 
-前端可以直接导入股票代码，也可以手动编辑配置。自选股详情缓存保存在：
+股票页的“大盘”子 tab 使用 `/stocks`，“个股”子 tab 使用 `/stocks?tab=watchlist`；选中具体股票后使用 `/stocks/{stock_id}`。前端可以直接导入股票代码，也可以手动编辑配置。自选股详情缓存保存在：
 
 ```text
 data/stock_watch_details.json

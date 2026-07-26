@@ -163,6 +163,11 @@ function stockIdFromPath(path) {
   return match ? decodeURIComponent(match[1]) : "";
 }
 
+function initialStockTab(stockId) {
+  if (stockId) return "watchlist";
+  return new URLSearchParams(window.location.search).get("tab") === "watchlist" ? "watchlist" : "market";
+}
+
 function AiPage() {
   const [activeTab, setActiveTab] = useState(() => {
     const requested = window.location.hash.replace(/^#/, "").split("/")[0];
@@ -591,6 +596,7 @@ function StocksPage({ stockId = "" }) {
   const [watchlistBusyId, setWatchlistBusyId] = useState("");
   const [editingStockId, setEditingStockId] = useState("");
   const [editingName, setEditingName] = useState("");
+  const [stockTab, setStockTab] = useState(() => initialStockTab(stockId));
 
   const knownMarketSignatures = useRef(new Map());
   const lastStatusText = useRef("");
@@ -635,12 +641,21 @@ function StocksPage({ stockId = "" }) {
     }
   }, [stockId]);
 
-  const updateStocksPath = useCallback((nextId = "") => {
-    const nextPath = nextId ? `/stocks/${encodeURIComponent(nextId)}` : "/stocks";
-    if (window.location.pathname !== nextPath) {
-      window.history.replaceState(null, "", nextPath);
+  const updateStocksPath = useCallback((nextId = "", nextTab = "market") => {
+    const nextLocation = nextId
+      ? `/stocks/${encodeURIComponent(nextId)}`
+      : nextTab === "watchlist"
+        ? "/stocks?tab=watchlist"
+        : "/stocks";
+    if (`${window.location.pathname}${window.location.search}` !== nextLocation) {
+      window.history.replaceState(null, "", nextLocation);
     }
   }, []);
+
+  const selectStockTab = useCallback((nextTab) => {
+    setStockTab(nextTab);
+    updateStocksPath(nextTab === "watchlist" ? selectedStockId : "", nextTab);
+  }, [selectedStockId, updateStocksPath]);
 
   const importStock = useCallback(async (event) => {
     event.preventDefault();
@@ -665,8 +680,9 @@ function StocksPage({ stockId = "" }) {
       const detailStatus = data.detailPrefetched ? "；后台已拉取详情数据" : data.detailPrefetchError ? "；详情数据拉取失败" : "";
       setImportStatus(`${data.imported ? "已导入" : "已存在"}：${stock.name || stock.symbol || query}${detailStatus}`);
       if (stock.id) {
+        setStockTab("watchlist");
         setSelectedStockId(stock.id);
-        updateStocksPath(stock.id);
+        updateStocksPath(stock.id, "watchlist");
       }
       const statusText = withWatchlistCount(lastStatusText.current || "自选股票已更新", nextWatchlist.length);
       lastStatusText.current = statusText;
@@ -681,16 +697,17 @@ function StocksPage({ stockId = "" }) {
   const selectStock = useCallback(
     (item) => {
       if (!item?.id) return;
+      setStockTab("watchlist");
       setSelectedStockId(item.id);
       setWatchlistActionStatus("");
-      updateStocksPath(item.id);
+      updateStocksPath(item.id, "watchlist");
     },
     [updateStocksPath]
   );
 
   const closeDetail = useCallback(() => {
     setSelectedStockId("");
-    updateStocksPath("");
+    updateStocksPath("", "watchlist");
   }, [updateStocksPath]);
 
   const startEditStock = useCallback((item) => {
@@ -753,7 +770,7 @@ function StocksPage({ stockId = "" }) {
         setWatchlistActionStatus(`已删除：${stockName}`);
         if (selectedStockId === item.id) {
           setSelectedStockId("");
-          updateStocksPath("");
+          updateStocksPath("", "watchlist");
         }
         if (editingStockId === item.id) {
           setEditingStockId("");
@@ -782,46 +799,78 @@ function StocksPage({ stockId = "" }) {
 
   return (
     <PageShell
-      eyebrow="A股 / 港股 / 美股"
+      eyebrow={stockTab === "market" ? "大盘 · A股 / 港股 / 美股" : "个股 · 自选股票"}
       title="股票市场流动性与估值"
       activePage="stocks"
       status={status}
       actions={<RefreshButton loading={refreshing} title="刷新股票数据" onClick={requestBackgroundRefresh} />}
     >
-      <section className="market-grid" aria-live="polite">
-        {!markets.length ? (
-          <p className="empty">暂未取到市场流动性数据。</p>
-        ) : (
-          markets.map((market, index) => {
-            const key = marketKey(market, index);
-            return <MarketCard key={key} market={market} snapshotAt={snapshotAt} isNew={newMarketKeys.has(key)} />;
-          })
-        )}
-      </section>
+      <div className="stock-subtabs" role="tablist" aria-label="股票功能">
+        <button
+          id="stock-tab-market"
+          className={stockTab === "market" ? "is-active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={stockTab === "market"}
+          aria-controls="stock-panel-market"
+          onClick={() => selectStockTab("market")}
+        >
+          <strong>大盘</strong>
+          <span>A股 · 港股 · 美股 · 市场总体数据</span>
+        </button>
+        <button
+          id="stock-tab-watchlist"
+          className={stockTab === "watchlist" ? "is-active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={stockTab === "watchlist"}
+          aria-controls="stock-panel-watchlist"
+          onClick={() => selectStockTab("watchlist")}
+        >
+          <strong>个股 <em>{watchlist.length}</em></strong>
+          <span>自选股票 · 行情 · 公司详情</span>
+        </button>
+      </div>
 
-      <IndustryFinancingTrendChart trend={industryFinancingTrend} />
+      {stockTab === "market" ? (
+        <div id="stock-panel-market" className="stock-tab-panel" role="tabpanel" aria-labelledby="stock-tab-market">
+          <section className="market-grid" aria-live="polite">
+            {!markets.length ? (
+              <p className="empty">暂未取到市场流动性数据。</p>
+            ) : (
+              markets.map((market, index) => {
+                const key = marketKey(market, index);
+                return <MarketCard key={key} market={market} snapshotAt={snapshotAt} isNew={newMarketKeys.has(key)} />;
+              })
+            )}
+          </section>
+          <IndustryFinancingTrendChart trend={industryFinancingTrend} />
+        </div>
+      ) : (
+        <div id="stock-panel-watchlist" className="stock-tab-panel" role="tabpanel" aria-labelledby="stock-tab-watchlist">
+          <WatchlistTable
+            items={watchlist}
+            importQuery={importQuery}
+            importStatus={importStatus}
+            importBusy={importBusy}
+            selectedStockId={selectedStockId}
+            actionStatus={watchlistActionStatus}
+            busyId={watchlistBusyId}
+            editingStockId={editingStockId}
+            editingName={editingName}
+            onImport={importStock}
+            onImportQueryChange={setImportQuery}
+            onSelectStock={selectStock}
+            onStartEdit={startEditStock}
+            onCancelEdit={cancelEditStock}
+            onSaveEdit={saveStockName}
+            onDelete={deleteStock}
+            onEditingNameChange={setEditingName}
+          />
 
-      <WatchlistTable
-        items={watchlist}
-        importQuery={importQuery}
-        importStatus={importStatus}
-        importBusy={importBusy}
-        selectedStockId={selectedStockId}
-        actionStatus={watchlistActionStatus}
-        busyId={watchlistBusyId}
-        editingStockId={editingStockId}
-        editingName={editingName}
-        onImport={importStock}
-        onImportQueryChange={setImportQuery}
-        onSelectStock={selectStock}
-        onStartEdit={startEditStock}
-        onCancelEdit={cancelEditStock}
-        onSaveEdit={saveStockName}
-        onDelete={deleteStock}
-        onEditingNameChange={setEditingName}
-      />
-
-      {selectedStockId && <StockWatchDetailEmbed stockId={selectedStockId} status={status} onClose={closeDetail} />}
+          {selectedStockId && <StockWatchDetailEmbed stockId={selectedStockId} status={status} onClose={closeDetail} />}
+        </div>
+      )}
     </PageShell>
   );
 }

@@ -477,6 +477,77 @@ footer {
   gap: 10px;
 }
 
+.stock-subtabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 5px;
+  border: 1px solid var(--page-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--page-accent) 4%, #ffffff);
+}
+
+.stock-subtabs button {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stock-subtabs button:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.stock-subtabs button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--page-accent) 24%, transparent);
+  outline-offset: 1px;
+}
+
+.stock-subtabs button.is-active {
+  border-color: color-mix(in srgb, var(--page-accent) 30%, var(--line));
+  color: var(--ink);
+  background: #ffffff;
+  box-shadow: 0 4px 14px rgba(23, 32, 42, 0.06);
+}
+
+.stock-subtabs strong {
+  font-size: 15px;
+}
+
+.stock-subtabs span {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stock-subtabs em {
+  display: inline-grid;
+  min-width: 20px;
+  margin-left: 3px;
+  border-radius: 999px;
+  padding: 1px 6px;
+  color: #ffffff;
+  background: var(--page-accent);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 18px;
+  place-items: center;
+}
+
+.stock-tab-panel > .watchlist-section {
+  margin-top: 0;
+}
+
 .industry-financing-section {
   overflow: hidden;
   margin-top: 12px;
@@ -4173,6 +4244,15 @@ footer {
 
   .page-nav a {
     flex: 1 1 0;
+  }
+
+  .stock-subtabs span {
+    display: none;
+  }
+
+  .stock-subtabs button {
+    place-items: center;
+    text-align: center;
   }
 
   .commodity-summary,
