@@ -17,16 +17,22 @@ from .commodity_service import clean_html, load_config, parse_dt, resolve_sqlite
 ENERGY_CACHE_LOCK = asyncio.Lock()
 DB_LOCK = asyncio.Lock()
 ENERGY_CACHE: dict[str, Any] = {"expires_at": datetime.min.replace(tzinfo=UTC), "data": None}
-ENERGY_SCHEMA_VERSION = 1
+ENERGY_SCHEMA_VERSION = 3
+ENERGY_HISTORY_POINTS = 18
+ENERGY_RELEASE_LINK_LIMIT = 24
 
-NBS_RELEASE_INDEXES = [
-    "https://www.stats.gov.cn/sj/zxfb/index.html",
-    "https://www.stats.gov.cn/sj/zxfb/index_1.html",
-    "https://www.stats.gov.cn/sj/zxfb/index_2.html",
+NBS_RELEASE_INDEXES = ["https://www.stats.gov.cn/sj/zxfb/index.html"] + [
+    f"https://www.stats.gov.cn/sj/zxfb/index_{index}.html" for index in range(1, 24)
 ]
 FALLBACK_ENERGY_RELEASE_URL = "https://www.stats.gov.cn/sj/zxfb/202606/t20260616_1963948.html"
 FALLBACK_INDUSTRIAL_RELEASE_URL = "https://www.stats.gov.cn/sj/zxfb/202606/t20260616_1963953.html"
 NUMBER_PATTERN = r"[-+]?\d+(?:\.\d+)?"
+
+ENERGY_SECTION_DEFINITIONS = [
+    {"id": "coal_supply", "name": "煤炭供需", "category": "煤炭"},
+    {"id": "oil_gas_supply", "name": "油气供需", "category": "油气"},
+    {"id": "power_mix", "name": "电力结构", "category": "电力"},
+]
 
 METRIC_DEFINITIONS: list[dict[str, str]] = [
     {"id": "raw_coal", "name": "原煤", "category": "煤炭", "label": "原煤（万吨）", "unit": "万吨"},
@@ -163,7 +169,7 @@ async def get_energy(refresh: bool = False, allow_stale: bool = True, force: boo
             errors.append(f"能源生产发布页索引失败：{error}")
 
         try:
-            industrial_links = await find_nbs_release_links(client, "规模以上工业增加值增长", limit=6)
+            industrial_links = await find_nbs_release_links(client, "规模以上工业增加值增长", limit=ENERGY_RELEASE_LINK_LIMIT)
             if industrial_links:
                 industrial_release_url = industrial_links[0]["url"]
             else:
@@ -214,9 +220,13 @@ async def get_energy(refresh: bool = False, allow_stale: bool = True, force: boo
 def build_fallback_rows() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for definition in METRIC_DEFINITIONS:
-        history = copy.deepcopy(FALLBACK_HISTORIES.get(definition["id"], []))
+        history = build_fallback_history(definition["id"], copy.deepcopy(FALLBACK_HISTORIES.get(definition["id"], [])))
         latest = history[-1] if history else {}
         cumulative = FALLBACK_CUMULATIVE.get(definition["id"], {})
+        has_estimated_history = any(point.get("estimated") for point in history)
+        note = "规模以上工业月度产品产量；环比按当月绝对量与上月绝对量计算。"
+        if has_estimated_history:
+            note += "；断网兜底时，K线早期月份用最近发布值和同比反推生成趋势种子，刷新成功后会被统计局历史覆盖。"
         rows.append(
             {
                 "id": definition["id"],
@@ -233,12 +243,108 @@ def build_fallback_rows() -> list[dict[str, Any]]:
                 "cumulativePeriodLabel": "1—5月",
                 "source": "国家统计局",
                 "sourceUrl": FALLBACK_INDUSTRIAL_RELEASE_URL,
-                "note": "规模以上工业月度产品产量；环比按当月绝对量与上月绝对量计算。",
+                "note": note,
                 "history": history,
             }
         )
     finalize_rows(rows)
     return rows
+
+
+def build_fallback_history(metric_id: str, seed_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seed = sorted(
+        [point for point in seed_history if point.get("period") and safe_float(point.get("value")) is not None],
+        key=lambda point: str(point.get("period") or ""),
+    )
+    if len(seed) < 2:
+        return seed
+
+    anchors: dict[str, dict[str, Any]] = {str(point["period"]): point for point in seed}
+    for point in seed:
+        value = safe_float(point.get("value"))
+        yoy = safe_float(point.get("yoy"))
+        if value is None or yoy is None:
+            continue
+        denominator = 1 + yoy / 100
+        if abs(denominator) < 0.01:
+            continue
+        prior_period = shift_period(str(point["period"]), -12)
+        anchors.setdefault(
+            prior_period,
+            {
+                "period": prior_period,
+                "periodLabel": month_label(prior_period),
+                "value": round(value / denominator, 1),
+                "estimated": True,
+            },
+        )
+
+    latest_period = str(seed[-1]["period"])
+    periods = [shift_period(latest_period, offset) for offset in range(-(ENERGY_HISTORY_POINTS - 1), 1)]
+    known_values = sorted(
+        (period_to_index(period), safe_float(point.get("value")))
+        for period, point in anchors.items()
+        if safe_float(point.get("value")) is not None
+    )
+    result: list[dict[str, Any]] = []
+    for period in periods:
+        point = copy.deepcopy(anchors.get(period) or {})
+        if point:
+            point.setdefault("periodLabel", month_label(period))
+            result.append(point)
+            continue
+        value = estimate_fallback_value(period, known_values)
+        result.append(
+            {
+                "period": period,
+                "periodLabel": month_label(period),
+                "value": value,
+                "estimated": True,
+            }
+        )
+    return result
+
+
+def estimate_fallback_value(period: str, known_values: list[tuple[int, float | None]]) -> float | None:
+    target = period_to_index(period)
+    known = [(index, value) for index, value in known_values if value is not None]
+    if not known:
+        return None
+    before = [item for item in known if item[0] <= target]
+    after = [item for item in known if item[0] >= target]
+    if before and after:
+        left_index, left_value = before[-1]
+        right_index, right_value = after[0]
+        if left_index == right_index:
+            return round(left_value, 1)
+        ratio = (target - left_index) / (right_index - left_index)
+        return round(left_value + (right_value - left_value) * ratio, 1)
+    nearest_index, nearest_value = (before[-1] if before else after[0])
+    months = target - nearest_index
+    return round(nearest_value * (1 + months * 0.003), 1)
+
+
+def shift_period(period: str, months: int) -> str:
+    year, month = parse_period(period)
+    total = year * 12 + month - 1 + months
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
+def period_to_index(period: str) -> int:
+    year, month = parse_period(period)
+    return year * 12 + month
+
+
+def parse_period(period: str) -> tuple[int, int]:
+    match = re.match(r"^(\d{4})-(\d{2})$", str(period or ""))
+    if not match:
+        return 1970, 1
+    return int(match.group(1)), int(match.group(2))
+
+
+def month_label(period: str) -> str:
+    _, month = parse_period(period)
+    return f"{month}月"
 
 
 async def find_nbs_release_links(client: httpx.AsyncClient, keyword: str, limit: int = 6) -> list[dict[str, str]]:
@@ -331,9 +437,31 @@ async def fetch_text(client: httpx.AsyncClient, url: str, label: str) -> str:
     if not response.encoding:
         response.encoding = "utf-8"
     text = response.text
+    text = repair_mojibake_text(text)
     if not text.strip():
         raise ValueError(f"{label}返回为空")
     return text
+
+
+def repair_mojibake_text(text: str) -> str:
+    if cjk_score(text) > 20:
+        return text
+    raw = bytearray()
+    for char in text:
+        code = ord(char)
+        if code <= 255:
+            raw.append(code)
+            continue
+        try:
+            raw.extend(char.encode("cp1252"))
+        except UnicodeEncodeError:
+            raw.extend(char.encode("utf-8"))
+    fixed = bytes(raw).decode("utf-8", errors="replace")
+    return fixed if cjk_score(fixed) > cjk_score(text) else text
+
+
+def cjk_score(text: str) -> int:
+    return sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
 
 
 def merge_energy_row(rows: list[dict[str, Any]], row_id: str, update: dict[str, Any]) -> None:
@@ -364,6 +492,8 @@ def append_history_point(target: dict[str, Any], update: dict[str, Any]) -> None
     for key in ["periodLabel", "value", "yoy", "mom"]:
         if key in update and update[key] is not None:
             point[key] = update[key]
+    if update.get("value") is not None:
+        point.pop("estimated", None)
 
 
 def finalize_rows(rows: list[dict[str, Any]]) -> None:
@@ -385,7 +515,7 @@ def finalize_rows(rows: list[dict[str, Any]]) -> None:
             point["high"] = max(open_value, value)
             point["low"] = min(open_value, value)
 
-        row["history"] = history[-12:]
+        row["history"] = history[-ENERGY_HISTORY_POINTS:]
         latest = next((point for point in reversed(history) if point.get("period") == row.get("period")), None)
         if latest and latest.get("mom") is not None:
             row["mom"] = latest["mom"]
@@ -397,12 +527,20 @@ def is_monthly_point(point: dict[str, Any]) -> bool:
 
 
 def build_sections(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    order = ["煤炭", "油气", "电力"]
     sections = []
-    for category in order:
+    for definition in ENERGY_SECTION_DEFINITIONS:
+        category = definition["category"]
         items = [row for row in rows if row.get("category") == category]
         if items:
-            sections.append({"id": category, "name": category, "rowCount": len(items), "rows": items})
+            sections.append(
+                {
+                    "id": definition["id"],
+                    "name": definition["name"],
+                    "category": category,
+                    "rowCount": len(items),
+                    "rows": items,
+                }
+            )
     return sections
 
 

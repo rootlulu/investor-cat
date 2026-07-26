@@ -1,0 +1,22 @@
+{
+  "request": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+  },
+  "auth": {
+    "cookie": "",
+    "cookieFile": "config/xueqiu_cookie.txt"
+  },
+  "browser": {
+    "enabled": true,
+    "headless": false,
+    "channel": "chromium",
+    "executable": "",
+    "profileDir": "data/xueqiu-browser-profile",
+    "libraryPath": "data/playwright-libs/usr/lib/x86_64-linux-gnu",
+    "timeoutMs": 18000,
+    "waitMs": 1000,
+    "lockTimeoutMs": 23000,
+    "interactiveWaitSeconds": 180,
+    "verifyPollSeconds": 1.0
+  }
+}

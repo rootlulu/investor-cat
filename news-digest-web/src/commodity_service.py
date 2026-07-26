@@ -17,10 +17,11 @@ CONFIG_PATH = ROOT_DIR / "config" / "sources.json"
 COMMODITY_CACHE_LOCK = asyncio.Lock()
 DB_LOCK = asyncio.Lock()
 COMMODITY_CACHE: dict[str, Any] = {"expires_at": datetime.min.replace(tzinfo=UTC), "data": None}
-COMMODITY_SCHEMA_VERSION = 8
+COMMODITY_SCHEMA_VERSION = 10
 
 SINA_FUTURES_URL = "https://hq.sinajs.cn/list={symbols}"
 SINA_FUTURES_KLINE_URL = "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_k=/InnerFuturesNewService.getDailyKLine"
+SINA_GLOBAL_FUTURES_KLINE_URL = "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_k=/GlobalFuturesService.getGlobalFuturesDailyKLine"
 SUNSIRS_FUTURES_URL = "https://futures.100ppi.com/"
 EASTMONEY_DATA_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 SMM_PRICE_URL = "https://www.smm.com.cn/price"
@@ -106,7 +107,7 @@ COMMODITIES = [
     {
         "id": "iron_ore",
         "name": "铁矿石",
-        "sector": "黑色煤焦钢矿",
+        "sector": "黑色链",
         "domesticFuture": "nf_I0",
         "globalFuture": "",
         "spotNames": [
@@ -121,7 +122,7 @@ COMMODITIES = [
     {
         "id": "coking_coal",
         "name": "焦煤",
-        "sector": "黑色煤焦钢矿",
+        "sector": "黑色链",
         "domesticFuture": "nf_JM0",
         "globalFuture": "",
         "spotNames": ["吕梁主焦煤价格", "太原主焦煤价格", "临汾主焦煤价格", "主焦煤价格"],
@@ -130,7 +131,7 @@ COMMODITIES = [
     {
         "id": "coke",
         "name": "焦炭",
-        "sector": "黑色煤焦钢矿",
+        "sector": "黑色链",
         "domesticFuture": "nf_J0",
         "globalFuture": "",
         "spotNames": ["干熄准一级冶金焦炭价格", "准一级冶金焦炭价格", "一级冶金焦炭价格"],
@@ -139,7 +140,7 @@ COMMODITIES = [
     {
         "id": "rebar",
         "name": "螺纹钢",
-        "sector": "黑色煤焦钢矿",
+        "sector": "黑色链",
         "domesticFuture": "nf_RB0",
         "globalFuture": "",
         "spotNames": ["SMM中国螺纹钢价格指数", "螺纹钢全国均价"],
@@ -148,18 +149,18 @@ COMMODITIES = [
     {
         "id": "hot_rolled_coil",
         "name": "热卷",
-        "sector": "黑色煤焦钢矿",
+        "sector": "黑色链",
         "domesticFuture": "nf_HC0",
         "globalFuture": "",
         "spotNames": ["SMM中国热轧板卷价格指数", "全国热卷均价", "热轧卷板", "热卷"],
         "unit": "元/吨",
     },
-    {"id": "crude_oil", "name": "原油", "sector": "能源化工", "domesticFuture": "nf_SC0", "globalFuture": "hf_OIL", "spotNames": ["原油"], "unit": "元/桶"},
-    {"id": "fuel_oil", "name": "燃料油", "sector": "能源化工", "domesticFuture": "nf_FU0", "globalFuture": "hf_HO", "spotNames": ["燃料油"], "unit": "元/吨"},
+    {"id": "crude_oil", "name": "原油", "sector": "大宗能源", "domesticFuture": "nf_SC0", "globalFuture": "hf_OIL", "spotNames": ["原油"], "unit": "元/桶"},
+    {"id": "fuel_oil", "name": "燃料油", "sector": "大宗能源", "domesticFuture": "nf_FU0", "globalFuture": "hf_HO", "spotNames": ["燃料油"], "unit": "元/吨"},
     {
         "id": "asphalt",
         "name": "沥青",
-        "sector": "能源化工",
+        "sector": "化工品",
         "domesticFuture": "nf_BU0",
         "globalFuture": "",
         "benchmarkFuture": "hf_OIL",
@@ -169,18 +170,18 @@ COMMODITIES = [
     {
         "id": "lpg",
         "name": "液化石油气",
-        "sector": "能源化工",
+        "sector": "大宗能源",
         "domesticFuture": "nf_PG0",
         "globalFuture": "",
         "benchmarkFuture": "hf_NG",
         "spotNames": ["液化石油气", "液化气"],
         "unit": "元/吨",
     },
-    {"id": "natural_gas", "name": "天然气", "sector": "能源化工", "domesticFuture": "", "globalFuture": "hf_NG", "spotNames": ["天然气"], "unit": ""},
+    {"id": "natural_gas", "name": "天然气", "sector": "大宗能源", "domesticFuture": "", "globalFuture": "hf_NG", "spotNames": ["天然气"], "unit": ""},
     {
         "id": "methanol",
         "name": "甲醇",
-        "sector": "能源化工",
+        "sector": "化工品",
         "domesticFuture": "nf_MA0",
         "globalFuture": "",
         "benchmarkFuture": "hf_OIL",
@@ -190,7 +191,7 @@ COMMODITIES = [
     {
         "id": "pta",
         "name": "PTA",
-        "sector": "能源化工",
+        "sector": "化工品",
         "domesticFuture": "nf_TA0",
         "globalFuture": "",
         "benchmarkFuture": "hf_OIL",
@@ -200,7 +201,7 @@ COMMODITIES = [
     {
         "id": "polypropylene",
         "name": "聚丙烯",
-        "sector": "能源化工",
+        "sector": "化工品",
         "domesticFuture": "nf_PP0",
         "globalFuture": "",
         "benchmarkFuture": "hf_OIL",
@@ -210,7 +211,7 @@ COMMODITIES = [
     {
         "id": "polyethylene",
         "name": "塑料",
-        "sector": "能源化工",
+        "sector": "化工品",
         "domesticFuture": "nf_L0",
         "globalFuture": "",
         "benchmarkFuture": "hf_OIL",
@@ -220,17 +221,17 @@ COMMODITIES = [
     {
         "id": "pvc",
         "name": "PVC",
-        "sector": "能源化工",
+        "sector": "化工品",
         "domesticFuture": "nf_V0",
         "globalFuture": "",
         "benchmarkFuture": "hf_OIL",
         "spotNames": ["聚氯乙烯", "PVC"],
         "unit": "元/吨",
     },
-    {"id": "rubber", "name": "天然橡胶", "sector": "能源化工", "domesticFuture": "nf_RU0", "globalFuture": "", "spotNames": ["天然橡胶"], "unit": "元/吨"},
-    {"id": "glass", "name": "玻璃", "sector": "建材化工", "domesticFuture": "nf_FG0", "globalFuture": "", "spotNames": ["玻璃"], "unit": "元/吨"},
-    {"id": "soda_ash", "name": "纯碱", "sector": "建材化工", "domesticFuture": "nf_SA0", "globalFuture": "", "spotNames": ["纯碱"], "unit": "元/吨"},
-    {"id": "urea", "name": "尿素", "sector": "建材化工", "domesticFuture": "nf_UR0", "globalFuture": "", "spotNames": ["尿素"], "unit": "元/吨"},
+    {"id": "rubber", "name": "天然橡胶", "sector": "化工品", "domesticFuture": "nf_RU0", "globalFuture": "", "spotNames": ["天然橡胶"], "unit": "元/吨"},
+    {"id": "glass", "name": "玻璃", "sector": "建材", "domesticFuture": "nf_FG0", "globalFuture": "", "spotNames": ["玻璃"], "unit": "元/吨"},
+    {"id": "soda_ash", "name": "纯碱", "sector": "建材", "domesticFuture": "nf_SA0", "globalFuture": "", "spotNames": ["纯碱"], "unit": "元/吨"},
+    {"id": "urea", "name": "尿素", "sector": "化肥", "domesticFuture": "nf_UR0", "globalFuture": "", "spotNames": ["尿素"], "unit": "元/吨"},
     {"id": "industrial_silicon", "name": "工业硅", "sector": "新能源材料", "domesticFuture": "nf_SI0", "globalFuture": "", "spotNames": ["工业硅"], "unit": "元/吨"},
     {"id": "polysilicon", "name": "多晶硅", "sector": "新能源材料", "domesticFuture": "nf_PS0", "globalFuture": "", "spotNames": ["多晶硅价格指数", "N型多晶硅料价格", "多晶硅"], "unit": "元/千克"},
     {"id": "lithium_carbonate", "name": "碳酸锂", "sector": "新能源材料", "domesticFuture": "nf_LC0", "globalFuture": "", "spotNames": ["电池级碳酸锂"], "unit": "元/吨"},
@@ -378,7 +379,14 @@ async def fetch_sina_futures(client: httpx.AsyncClient) -> tuple[dict[str, dict[
 
 
 async def fetch_sina_future_histories(client: httpx.AsyncClient) -> tuple[dict[str, list[dict[str, Any]]], str]:
-    symbols = [item["domesticFuture"] for item in COMMODITIES if item.get("domesticFuture")]
+    symbols = sorted(
+        {
+            symbol
+            for item in COMMODITIES
+            for symbol in [item.get("domesticFuture"), item.get("globalFuture"), item.get("benchmarkFuture")]
+            if symbol
+        }
+    )
     tasks = [fetch_sina_future_history(client, symbol) for symbol in symbols]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     rows: dict[str, list[dict[str, Any]]] = {}
@@ -396,9 +404,10 @@ async def fetch_sina_future_histories(client: httpx.AsyncClient) -> tuple[dict[s
 
 
 async def fetch_sina_future_history(client: httpx.AsyncClient, symbol: str) -> list[dict[str, Any]]:
+    is_global = symbol.startswith("hf_")
     response = await client.get(
-        SINA_FUTURES_KLINE_URL,
-        params={"symbol": symbol.replace("nf_", "")},
+        SINA_GLOBAL_FUTURES_KLINE_URL if is_global else SINA_FUTURES_KLINE_URL,
+        params={"symbol": symbol.replace("hf_", "").replace("nf_", "")},
         headers={
             "User-Agent": user_agent(),
             "Referer": "https://finance.sina.com.cn/futures/",
@@ -421,20 +430,20 @@ def parse_sina_future_history(text: str) -> list[dict[str, Any]]:
     for row in payload:
         if not isinstance(row, dict):
             continue
-        close = safe_float(row.get("c"))
-        date_text = str(row.get("d") or "").strip()
+        close = safe_float(row.get("c") or row.get("close"))
+        date_text = str(row.get("d") or row.get("date") or "").strip()
         if close is None or not date_text:
             continue
         rows.append(
             {
                 "date": date_text,
-                "open": safe_float(row.get("o")),
-                "high": safe_float(row.get("h")),
-                "low": safe_float(row.get("l")),
+                "open": safe_float(row.get("o") or row.get("open")),
+                "high": safe_float(row.get("h") or row.get("high")),
+                "low": safe_float(row.get("l") or row.get("low")),
                 "close": close,
-                "volume": safe_float(row.get("v")),
-                "openInterest": safe_float(row.get("p")),
-                "settle": safe_float(row.get("s")),
+                "volume": safe_float(row.get("v") or row.get("volume")),
+                "openInterest": safe_float(row.get("p") or row.get("position")),
+                "settle": safe_float(row.get("s") or row.get("settlement")),
             }
         )
     return rows
@@ -1315,13 +1324,20 @@ def build_commodity_item(
     domestic_future = futures.get(definition.get("domesticFuture", ""))
     domestic_future_history = future_histories.get(definition.get("domesticFuture", ""), [])
     global_future = futures.get(definition.get("globalFuture", ""))
+    global_future_history = future_histories.get(definition.get("globalFuture", ""), [])
     benchmark_future = futures.get(definition.get("benchmarkFuture", ""))
+    benchmark_future_history = future_histories.get(definition.get("benchmarkFuture", ""), [])
     inventory = inventories.get(definition["id"])
     spot_price = spot.get("price") if spot else None
     domestic_price = domestic_future.get("price") if domestic_future else None
     if domestic_price is None and domestic_future_history:
         domestic_price = domestic_future_history[-1].get("close")
     global_price = global_future.get("price") if global_future else None
+    if global_price is None and global_future_history:
+        global_price = global_future_history[-1].get("close")
+    benchmark_price = benchmark_future.get("price") if benchmark_future else None
+    if benchmark_price is None and benchmark_future_history:
+        benchmark_price = benchmark_future_history[-1].get("close")
     basis = None
     basis_pct = None
     basis_future_contract = ""
@@ -1380,12 +1396,14 @@ def build_commodity_item(
         "globalFuturePrice": global_price,
         "globalFutureChangePct": global_future.get("changePct") if global_future else None,
         "globalFutureVolume": global_future.get("volume") if global_future else None,
-        "globalFutureDate": global_future.get("date") if global_future else "",
+        "globalFutureDate": global_future.get("date") if global_future else (global_future_history[-1].get("date") if global_future_history else ""),
+        "globalFutureHistory": global_future_history,
         "benchmarkFutureSymbol": benchmark_future.get("symbol") if benchmark_future else definition.get("benchmarkFuture", "").replace("hf_", ""),
         "benchmarkFutureName": benchmark_future.get("name") if benchmark_future else "",
-        "benchmarkFuturePrice": benchmark_future.get("price") if benchmark_future else None,
+        "benchmarkFuturePrice": benchmark_price,
         "benchmarkFutureChangePct": benchmark_future.get("changePct") if benchmark_future else None,
-        "benchmarkFutureDate": benchmark_future.get("date") if benchmark_future else "",
+        "benchmarkFutureDate": benchmark_future.get("date") if benchmark_future else (benchmark_future_history[-1].get("date") if benchmark_future_history else ""),
+        "benchmarkFutureHistory": benchmark_future_history,
         "crossMarketSpread": cross_market_spread,
         "crossMarketSpreadPct": cross_market_spread_pct,
         "basis": basis,
