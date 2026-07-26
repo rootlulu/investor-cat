@@ -18,6 +18,8 @@ except ModuleNotFoundError:
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 
 class ResearchApiStub(BaseHTTPRequestHandler):
@@ -40,13 +42,24 @@ class ResearchApiStub(BaseHTTPRequestHandler):
                 "method": self.command,
                 "path": self.path,
                 "action": self.headers.get("X-Xueqiu-Research-Action"),
+                "dataAction": self.headers.get("X-News-Digest-Data-Action"),
             }
         )
 
     def do_GET(self) -> None:
         self.record()
         path = urlparse(self.path).path
-        if path == "/api/xueqiu/research":
+        if path == "/api/health":
+            self.send_json(200, {"status": "ok"})
+        elif path == "/api/financials/sources":
+            self.send_json(
+                200,
+                {
+                    "analysisBoundary": "data_only_codex_analyzes",
+                    "sources": [{"id": "sec_edgar", "market": "us", "status": "configuration_required"}],
+                },
+            )
+        elif path == "/api/xueqiu/research":
             self.send_json(
                 200,
                 {
@@ -105,7 +118,19 @@ class ResearchApiStub(BaseHTTPRequestHandler):
         self.record()
         path = urlparse(self.path).path
         if self.headers.get("X-Xueqiu-Research-Action") != "1":
-            self.send_json(403, {"detail": "action header required"})
+            if path == "/api/financials/sync" and self.headers.get("X-News-Digest-Data-Action") == "1":
+                self.send_json(
+                    200,
+                    {
+                        "market": "hk",
+                        "symbol": "00700",
+                        "status": "license_required",
+                        "facts": [],
+                        "analysisBoundary": "data_only_codex_analyzes",
+                    },
+                )
+            else:
+                self.send_json(403, {"detail": "action header required"})
         elif path == "/api/xueqiu/research/influencers/game-v/crawl":
             self.send_json(202, {"id": "job-1", "status": "queued", "active": True})
         elif path == "/api/xueqiu/research/jobs/job-1/cancel":
@@ -115,7 +140,7 @@ class ResearchApiStub(BaseHTTPRequestHandler):
 
 
 @unittest.skipUnless(ClientSession is not None, "run with requirements-mcp.txt environment")
-class XueqiuMcpStdioTests(unittest.IsolatedAsyncioTestCase):
+class NewsDigestMcpStdioTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
         ResearchApiStub.requests.clear()
@@ -133,7 +158,7 @@ class XueqiuMcpStdioTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_list_and_call_tools_over_real_stdio(self) -> None:
         parameters = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "src.xueqiu_mcp_server"],
+            args=["-m", "src.news_digest_mcp_server"],
             cwd=ROOT_DIR,
             env={
                 "NEWS_DIGEST_BASE_URL": self.base_url,
@@ -143,13 +168,31 @@ class XueqiuMcpStdioTests(unittest.IsolatedAsyncioTestCase):
         async with stdio_client(parameters) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 initialized = await session.initialize()
-                self.assertEqual(initialized.serverInfo.name, "xueqiu-research")
+                self.assertEqual(initialized.serverInfo.name, "news-digest")
 
                 listed = await session.list_tools()
                 tools = {tool.name: tool for tool in listed.tools}
                 self.assertEqual(
                     set(tools),
                     {
+                        "get_service_health",
+                        "get_today_snapshot",
+                        "get_news_snapshot",
+                        "get_ai_news_snapshot",
+                        "get_ai_projects_snapshot",
+                        "get_stock_market_snapshot",
+                        "get_stock_watchlist",
+                        "get_stock_detail",
+                        "get_financial_sources",
+                        "get_company_financials",
+                        "sync_company_financials",
+                        "get_commodities_snapshot",
+                        "get_energy_snapshot",
+                        "get_consumption_snapshot",
+                        "get_macro_snapshot",
+                        "get_games_snapshot",
+                        "get_games_region_snapshot",
+                        "get_xueqiu_snapshot",
                         "list_influencers",
                         "get_corpus_status",
                         "start_influencer_crawl",
@@ -163,6 +206,15 @@ class XueqiuMcpStdioTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(tools["search_xueqiu_evidence"].annotations.readOnlyHint)
                 self.assertFalse(tools["start_influencer_crawl"].annotations.readOnlyHint)
                 self.assertTrue(tools["cancel_crawl"].annotations.destructiveHint)
+                self.assertTrue(tools["get_company_financials"].annotations.readOnlyHint)
+                self.assertFalse(tools["sync_company_financials"].annotations.readOnlyHint)
+
+                health = await session.call_tool("get_service_health", {})
+                self.assertFalse(health.isError)
+
+                sources = await session.call_tool("get_financial_sources", {})
+                self.assertFalse(sources.isError)
+                self.assertEqual(sources.structuredContent["analysisBoundary"], "data_only_codex_analyzes")
 
                 status = await session.call_tool("get_corpus_status", {"influencer_id": "game-v"})
                 self.assertFalse(status.isError)
@@ -179,6 +231,15 @@ class XueqiuMcpStdioTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(media.isError)
                 self.assertFalse(media.structuredContent["downloaded"])
 
+                self.assertFalse(any(item["method"] == "POST" for item in ResearchApiStub.requests))
+
+                financial_sync = await session.call_tool(
+                    "sync_company_financials",
+                    {"market": "hk", "symbol": "700"},
+                )
+                self.assertFalse(financial_sync.isError)
+                self.assertEqual(financial_sync.structuredContent["status"], "license_required")
+
                 started = await session.call_tool(
                     "start_influencer_crawl",
                     {"influencer_id": "game-v", "mode": "full"},
@@ -191,11 +252,12 @@ class XueqiuMcpStdioTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(cancelled.structuredContent["cancelRequested"])
 
         write_requests = [item for item in ResearchApiStub.requests if item["method"] == "POST"]
-        self.assertEqual(len(write_requests), 2)
-        self.assertTrue(all(item["action"] == "1" for item in write_requests))
+        self.assertEqual(len(write_requests), 3)
+        self.assertEqual(sum(item["dataAction"] == "1" for item in write_requests), 1)
+        self.assertEqual(sum(item["action"] == "1" for item in write_requests), 2)
 
     async def test_rejects_non_loopback_base_url(self) -> None:
-        from src.xueqiu_mcp_server import get_base_url
+        from src.news_digest_mcp_server import get_base_url
 
         with patch.dict(os.environ, {"NEWS_DIGEST_BASE_URL": "https://example.com"}):
             with self.assertRaisesRegex(RuntimeError, "loopback"):

@@ -14,10 +14,30 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
+from zoneinfo import ZoneInfo
 
 import requests
 
+from .request_coordinator import (
+    DomainCoolingDown,
+    coordinate_requests_session,
+    coordinated_requests_request,
+)
+from .stock_research import build_portfolio_exposure_notice, build_stock_research_snapshot
 from .stock_service import safe_float
+
+try:
+    WATCHLIST_MARKET_TIMEZONES = {
+        "a_share": ZoneInfo("Asia/Shanghai"),
+        "hk": ZoneInfo("Asia/Hong_Kong"),
+        "us": ZoneInfo("America/New_York"),
+    }
+except Exception:
+    WATCHLIST_MARKET_TIMEZONES = {
+        "a_share": UTC,
+        "hk": UTC,
+        "us": UTC,
+    }
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 WATCHLIST_CONFIG_PATH = ROOT_DIR / "config" / "stock_watchlist.json"
@@ -61,12 +81,24 @@ BROWSER_USER_AGENT = (
 
 WATCHLIST_CACHE_SECONDS = 90
 DETAIL_CACHE_SECONDS = 30 * 60
-DETAIL_CACHE_VERSION = 2
+DETAIL_CACHE_VERSION = 3
 WATCHLIST_CACHE: dict[str, Any] = {"expires_at": 0.0, "data": None, "version": 0}
 WATCHLIST_STATE: dict[str, Any] = {"version": 0}
 DETAIL_CACHE: dict[str, dict[str, Any]] = {}
 DETAIL_STORE_LOCK = threading.Lock()
 WATCHLIST_LOCK = asyncio.Lock()
+QUOTE_PROVENANCE_FIELDS = (
+    "price",
+    "changePct",
+    "change",
+    "volume",
+    "amount",
+    "marketCap",
+    "floatMarketCap",
+    "pe",
+    "pb",
+    "turnoverRate",
+)
 
 
 async def get_stock_watchlist(refresh: bool = False) -> dict[str, Any]:
@@ -271,11 +303,13 @@ def fetch_stock_watchlist_sync() -> dict[str, Any]:
             quote = empty_quote(stock)
         items.append({**stock_public_fields(stock), **quote, **detail_cache_meta(stock["id"])})
 
+    generated_at = datetime.now(UTC).isoformat()
     return {
-        "generatedAt": datetime.now(UTC).isoformat(),
+        "generatedAt": generated_at,
         "cached": False,
         "source": "东方财富行情 / Google News / 东方财富股吧 / 雪球 / 东方财富资金流向 / 东方财富公告与研报",
         "items": items,
+        "portfolioExposure": build_portfolio_exposure_notice(items),
         "errors": errors,
     }
 
@@ -304,11 +338,14 @@ def fetch_stock_detail_sync(stock_id: str) -> dict[str, Any]:
         "ratings": safe_section(lambda: fetch_ratings_sync(stock, 15), errors, "券商评级"),
     }
 
+    generated_at = datetime.now(UTC).isoformat()
+    stock_payload = {**stock_public_fields(stock), **quote}
     return {
-        "generatedAt": datetime.now(UTC).isoformat(),
+        "generatedAt": generated_at,
         "cached": False,
-        "stock": {**stock_public_fields(stock), **quote},
+        "stock": stock_payload,
         "sections": sections,
+        "research": build_stock_research_snapshot(stock_payload, sections, generated_at=generated_at),
         "errors": errors,
     }
 
@@ -321,6 +358,12 @@ def fetch_and_store_detail_sync(stock_id: str) -> dict[str, Any]:
 
 def hydrate_detail_quote_sync(stock_id: str, data: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(data)
+    if not isinstance(result.get("research"), dict):
+        result["research"] = build_stock_research_snapshot(
+            result.get("stock") if isinstance(result.get("stock"), dict) else {},
+            result.get("sections") if isinstance(result.get("sections"), dict) else {},
+            generated_at=result.get("generatedAt") or datetime.now(UTC).isoformat(),
+        )
     stocks = load_watchlist_config()
     stock = next((item for item in stocks if item["id"] == stock_id), None)
     if not stock:
@@ -342,6 +385,11 @@ def hydrate_detail_quote_sync(stock_id: str, data: dict[str, Any]) -> dict[str, 
         **(result.get("stock") or {}),
         **quote,
     }
+    result["research"] = build_stock_research_snapshot(
+        result["stock"],
+        result.get("sections") if isinstance(result.get("sections"), dict) else {},
+        generated_at=datetime.now(UTC).isoformat(),
+    )
     return result
 
 
@@ -439,6 +487,12 @@ def read_cached_detail_sync(stock_id: str, fresh_only: bool = False) -> dict[str
     if fresh_only and stale:
         return None
     result = json.loads(json.dumps(data, ensure_ascii=False))
+    if not isinstance(result.get("research"), dict):
+        result["research"] = build_stock_research_snapshot(
+            result.get("stock") if isinstance(result.get("stock"), dict) else {},
+            result.get("sections") if isinstance(result.get("sections"), dict) else {},
+            generated_at=result.get("generatedAt") or datetime.fromtimestamp(cached_at, UTC).isoformat(),
+        )
     result["cached"] = True
     result["stale"] = stale
     result["cacheUpdatedAt"] = datetime.fromtimestamp(cached_at, UTC).isoformat()
@@ -699,9 +753,16 @@ def fetch_quotes_sync(stocks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
             continue
         quote = parse_quote_row(row, stock)
         fallback = tencent_map.get(stock["id"]) or {}
+        field_sources = quote.get("fieldSources") if isinstance(quote.get("fieldSources"), dict) else {}
+        fallback_sources = fallback.get("fieldSources") if isinstance(fallback.get("fieldSources"), dict) else {}
         for key, value in fallback.items():
+            if key == "fieldSources":
+                continue
             if quote.get(key) in (None, "") and value not in (None, ""):
                 quote[key] = value
+                if isinstance(fallback_sources.get(key), dict):
+                    field_sources[key] = fallback_sources[key]
+        quote["fieldSources"] = field_sources
         result[stock["id"]] = quote
     for stock_id, quote in tencent_map.items():
         result.setdefault(stock_id, quote)
@@ -711,6 +772,7 @@ def fetch_quotes_sync(stocks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
 def parse_quote_row(row: dict[str, Any], stock: dict[str, Any]) -> dict[str, Any]:
     timestamp = safe_float(row.get("f124"))
     updated_at = datetime.fromtimestamp(timestamp, UTC).isoformat() if timestamp else ""
+    source_url = default_quote_url(stock)
     return {
         "price": safe_float(row.get("f2")),
         "changePct": safe_float(row.get("f3")),
@@ -726,11 +788,14 @@ def parse_quote_row(row: dict[str, Any], stock: dict[str, Any]) -> dict[str, Any
         "quoteName": normalize_text(row.get("f14")),
         "updatedAt": updated_at,
         "source": "东方财富行情",
-        "quoteUrl": default_quote_url(stock),
+        "sourceUrl": source_url,
+        "quoteUrl": source_url,
+        "fieldSources": build_quote_field_sources("东方财富行情", source_url),
     }
 
 
 def empty_quote(stock: dict[str, Any]) -> dict[str, Any]:
+    source_url = default_quote_url(stock)
     return {
         "price": None,
         "changePct": None,
@@ -746,13 +811,17 @@ def empty_quote(stock: dict[str, Any]) -> dict[str, Any]:
         "quoteName": "",
         "updatedAt": "",
         "source": "东方财富行情",
-        "quoteUrl": default_quote_url(stock),
+        "sourceUrl": source_url,
+        "quoteUrl": source_url,
+        "fieldSources": build_quote_field_sources("东方财富行情", source_url),
     }
 
 
 def fetch_tencent_quotes_sync(stocks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     symbols = [infer_tencent_symbol(stock) for stock in stocks]
-    response = requests.get(
+    response = coordinated_requests_request(
+        requests,
+        "GET",
         f"{TENCENT_QUOTE_API}{','.join(symbols)}",
         headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"},
         timeout=12,
@@ -793,9 +862,19 @@ def parse_tencent_quote(raw: str, stock: dict[str, Any]) -> dict[str, Any] | Non
         trade_parts = parts[35].split("/")
         if len(trade_parts) >= 3:
             amount = safe_float(trade_parts[2])
-    market_cap_index = 46 if market == "us" else 45
+    market_cap_index = 45
+    float_market_cap_index = 44
+    pb_index = 46 if market == "a_share" else 58 if market == "hk" else None
     turnover_index = 38 if market in ("a_share", "us") else 52
-    updated_at = parse_tencent_quote_time(parts[30] if len(parts) > 30 else "")
+    updated_at = parse_tencent_quote_time(parts[30] if len(parts) > 30 else "", market)
+    source_url = f"{TENCENT_QUOTE_API}{infer_tencent_symbol(stock)}"
+    field_sources = build_quote_field_sources("腾讯行情", source_url)
+    for field in ("marketCap", "floatMarketCap"):
+        field_sources[field] = {
+            **field_sources[field],
+            "method": "derived",
+            "formula": "腾讯行情市值字段 × 100,000,000（按市场报价币种）",
+        }
     return {
         "price": safe_float_at(parts, 3),
         "changePct": safe_float_at(parts, 32),
@@ -803,15 +882,24 @@ def parse_tencent_quote(raw: str, stock: dict[str, Any]) -> dict[str, Any] | Non
         "volume": volume,
         "amount": amount,
         "marketCap": multiply_or_none(safe_float_at(parts, market_cap_index), 100_000_000),
-        "floatMarketCap": multiply_or_none(safe_float_at(parts, 45), 100_000_000),
+        "floatMarketCap": multiply_or_none(safe_float_at(parts, float_market_cap_index), 100_000_000),
         "pe": safe_float_at(parts, 39),
-        "pb": safe_float_at(parts, 59),
+        "pb": safe_float_at(parts, pb_index) if pb_index is not None else None,
         "turnoverRate": safe_float_at(parts, turnover_index),
         "industry": "",
         "quoteName": normalize_text(parts[1] if len(parts) > 1 else ""),
         "updatedAt": updated_at,
         "source": "腾讯行情",
+        "sourceUrl": source_url,
         "quoteUrl": default_quote_url(stock),
+        "fieldSources": field_sources,
+    }
+
+
+def build_quote_field_sources(source: str, source_url: str) -> dict[str, dict[str, str]]:
+    return {
+        field: {"source": source, "sourceUrl": source_url, "method": "observed"}
+        for field in QUOTE_PROVENANCE_FIELDS
     }
 
 
@@ -823,11 +911,13 @@ def multiply_or_none(value: float | None, multiplier: float) -> float | None:
     return value * multiplier if value is not None else None
 
 
-def parse_tencent_quote_time(value: str) -> str:
+def parse_tencent_quote_time(value: str, market: str = "a_share") -> str:
     text = normalize_text(value)
+    market_timezone = WATCHLIST_MARKET_TIMEZONES.get(normalize_market(market), WATCHLIST_MARKET_TIMEZONES["a_share"])
     for pattern in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S"):
         try:
-            return datetime.strptime(text, pattern).replace(tzinfo=UTC).isoformat()
+            local_time = datetime.strptime(text, pattern).replace(tzinfo=market_timezone)
+            return local_time.astimezone(UTC).isoformat()
         except ValueError:
             continue
     return ""
@@ -1407,6 +1497,8 @@ def fetch_xueqiu_posts_sync(stock: dict[str, Any], limit: int) -> list[dict[str,
             posts = parse_xueqiu_post_rows(rows, stock)
             if posts:
                 return posts[:limit]
+        except DomainCoolingDown:
+            raise
         except Exception as error:
             errors.append(normalize_remote_error(error))
     raise RuntimeError("；".join(item for item in errors if item) or "未返回帖子")
@@ -1479,7 +1571,13 @@ def fetch_capital_flow_sync(stock: dict[str, Any]) -> dict[str, Any]:
         try:
             sina_items = fetch_sina_capital_flow_items(stock, 15)
             if sina_items:
-                return {"source": "新浪资金流向", "items": sina_items}
+                return {
+                    "source": "新浪资金流向",
+                    "sourceUrl": f"{SINA_CAPITAL_FLOW_API}?{urlencode({'daima': infer_sina_symbol(stock)})}",
+                    "method": "observed",
+                    "kind": "capital_flow",
+                    "items": sina_items,
+                }
         except Exception as error:
             errors.append(f"新浪资金流向：{normalize_remote_error(error)}")
     else:
@@ -1498,12 +1596,14 @@ def fetch_capital_flow_sync(stock: dict[str, Any]) -> dict[str, Any]:
         "lmt": "15",
     }
     rows: list[Any] = []
+    source_api = ""
     session = create_browser_session(default_quote_url(stock))
     for api in EASTMONEY_CAPITAL_FLOW_APIS:
         try:
             data = request_get(api, params=params, referer=default_quote_url(stock), session=session, attempts=2)
             rows = ((data.get("data") or {}).get("klines") or [])[-15:]
             if rows:
+                source_api = api
                 break
         except Exception as error:
             errors.append(normalize_remote_error(error))
@@ -1519,7 +1619,13 @@ def fetch_capital_flow_sync(stock: dict[str, Any]) -> dict[str, Any]:
             try:
                 sina_items = fetch_sina_capital_flow_items(stock, 15)
                 if sina_items:
-                    return {"source": "新浪资金流向", "items": sina_items}
+                    return {
+                        "source": "新浪资金流向",
+                        "sourceUrl": f"{SINA_CAPITAL_FLOW_API}?{urlencode({'daima': infer_sina_symbol(stock)})}",
+                        "method": "observed",
+                        "kind": "capital_flow",
+                        "items": sina_items,
+                    }
             except Exception as error:
                 errors.append(f"新浪资金流向：{normalize_remote_error(error)}")
         raise RuntimeError("；".join(item for item in errors if item) or "资金流接口未返回数据")
@@ -1541,7 +1647,13 @@ def fetch_capital_flow_sync(stock: dict[str, Any]) -> dict[str, Any]:
                 "changePct": safe_float(parts[11]) if len(parts) > 11 else None,
             }
         )
-    return {"source": "东方财富资金流向", "items": items}
+    return {
+        "source": "东方财富资金流向",
+        "sourceUrl": f"{source_api}?{urlencode(params)}",
+        "method": "observed",
+        "kind": "capital_flow",
+        "items": items,
+    }
 
 
 def fetch_sina_capital_flow_items(stock: dict[str, Any], limit: int) -> list[dict[str, Any]]:
@@ -1590,9 +1702,14 @@ def build_yahoo_capital_flow_proxy_result(stock: dict[str, Any], limit: int) -> 
     items = fetch_yahoo_capital_flow_proxy_items(stock, limit)
     currency = normalize_text(items[0].get("currency")) if items else ""
     currency_hint = f"({currency})" if currency else ""
+    encoded_symbol = quote(infer_yahoo_symbol(stock), safe="")
     return {
         "source": f"Yahoo成交额代理{currency_hint}",
-        "note": "Yahoo不提供主力/大单拆分；以成交额乘当日涨跌幅估算资金压力。",
+        "sourceUrl": f"https://finance.yahoo.com/quote/{encoded_symbol}/history",
+        "method": "proxy",
+        "kind": "price_pressure_proxy",
+        "formula": "成交额（收盘价×成交量）×当日涨跌幅",
+        "note": "Yahoo不提供主力/大单拆分；这里是成交额价格压力代理，不是主力净流入或真实资金流。",
         "items": items,
     }
 
@@ -1670,12 +1787,16 @@ def parse_yahoo_capital_flow_proxy_rows(result: Any, limit: int) -> list[dict[st
         items.append(
             {
                 "date": date,
-                "mainNetInflow": proxy_flow,
+                "mainNetInflow": None,
                 "smallNetInflow": None,
                 "largeNetInflow": None,
-                "mainNetRatio": change_pct,
+                "mainNetRatio": None,
                 "smallNetRatio": None,
                 "largeNetRatio": None,
+                "pricePressureProxy": proxy_flow,
+                "pricePressureRatio": change_pct,
+                "method": "proxy",
+                "formula": "成交额（收盘价×成交量）×当日涨跌幅",
                 "close": close,
                 "changePct": change_pct,
                 "currency": currency,
@@ -1914,17 +2035,14 @@ def request_get(
             client.get(warmup_url, timeout=8)
         except Exception:
             pass
-    last_error: Exception | None = None
-    for attempt in range(max(1, attempts)):
-        try:
-            response = client.get(url, params=params, timeout=12)
-            response.raise_for_status()
-            return response_json(response)
-        except Exception as error:
-            last_error = error
-            if attempt < attempts - 1:
-                time.sleep(0.6 + attempt * 0.8)
-    raise RuntimeError(normalize_remote_error(last_error))
+    try:
+        response = client.get(url, params=params, timeout=12)
+        response.raise_for_status()
+        return response_json(response)
+    except DomainCoolingDown:
+        raise
+    except Exception as error:
+        raise RuntimeError(normalize_remote_error(error)) from error
 
 
 def request_post(
@@ -1937,17 +2055,14 @@ def request_post(
 ) -> dict[str, Any]:
     client = session or create_browser_session(referer, accept=accept)
     client.headers.update(common_headers(referer, accept=accept))
-    last_error: Exception | None = None
-    for attempt in range(max(1, attempts)):
-        try:
-            response = client.post(url, data=data, timeout=12)
-            response.raise_for_status()
-            return response_json(response)
-        except Exception as error:
-            last_error = error
-            if attempt < attempts - 1:
-                time.sleep(0.6 + attempt * 0.8)
-    raise RuntimeError(normalize_remote_error(last_error))
+    try:
+        response = client.post(url, data=data, timeout=12)
+        response.raise_for_status()
+        return response_json(response)
+    except DomainCoolingDown:
+        raise
+    except Exception as error:
+        raise RuntimeError(normalize_remote_error(error)) from error
 
 
 def request_text(
@@ -1959,18 +2074,15 @@ def request_text(
 ) -> str:
     client = session or create_browser_session(referer, accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
     client.headers.update(common_headers(referer, accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"))
-    last_error: Exception | None = None
-    for attempt in range(max(1, attempts)):
-        try:
-            response = client.get(url, timeout=12)
-            response.raise_for_status()
-            response.encoding = encoding
-            return response.text
-        except Exception as error:
-            last_error = error
-            if attempt < attempts - 1:
-                time.sleep(0.6 + attempt * 0.8)
-    raise RuntimeError(normalize_remote_error(last_error))
+    try:
+        response = client.get(url, timeout=12)
+        response.raise_for_status()
+        response.encoding = encoding
+        return response.text
+    except DomainCoolingDown:
+        raise
+    except Exception as error:
+        raise RuntimeError(normalize_remote_error(error)) from error
 
 
 def response_json(response: requests.Response) -> dict[str, Any]:
@@ -1990,7 +2102,7 @@ def response_json(response: requests.Response) -> dict[str, Any]:
 def create_browser_session(referer: str = "", accept: str = "*/*") -> requests.Session:
     session = requests.Session()
     session.headers.update(common_headers(referer, accept=accept))
-    return session
+    return coordinate_requests_session(session)
 
 
 def common_headers(referer: str = "", accept: str = "*/*") -> dict[str, str]:

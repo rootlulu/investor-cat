@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from .background_refresh import refresh_status, start_background_refresh, start_
 from .commodity_service import get_commodities
 from .consumption_service import get_consumption
 from .energy_service import get_energy
+from .financial_service import FinancialSourceError, financial_source_catalog, get_financial_snapshot, sync_financial_snapshot
 from .game_provider_service import (
     GameProviderError,
     cancel_game_provider_login,
@@ -19,10 +21,23 @@ from .game_provider_service import (
     start_game_provider_login,
 )
 from .game_region_service import get_region_games
-from .game_service import get_games
+from .game_service import get_games, invalidate_game_cache
+from .game_watchlist_service import (
+    WatchlistNotFoundError,
+    WatchlistValidationError,
+    create_watchlist_region as create_game_watchlist_region,
+    delete_watchlist_game as delete_game_watchlist_item,
+    delete_watchlist_region as delete_game_watchlist_region,
+    import_watchlist as import_game_watchlist,
+    load_watchlist as load_game_watchlist,
+    update_watchlist_game as update_game_watchlist_item,
+    update_watchlist_region as update_game_watchlist_region,
+)
+from .local_access import LocalWriteGuardMiddleware
 from .macro_service import get_macro
 from .news_service import get_news, render_markdown
 from .stock_service import get_industry_financing_group, get_stocks
+from .today_service import get_today
 from .watchlist_service import delete_stock_from_watchlist, get_stock_watch_detail, get_stock_watchlist, import_stock_to_watchlist, update_stock_watchlist_item
 from .xueqiu_research_service import (
     cancel_research_job,
@@ -39,6 +54,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 PUBLIC_DIR = ROOT_DIR / "public"
 
 app = FastAPI(title="News Digest", version="0.2.0")
+app.add_middleware(LocalWriteGuardMiddleware)
 
 
 @app.on_event("startup")
@@ -65,6 +81,11 @@ async def api_ai_news(refresh: bool = False) -> dict:
 @app.get("/api/ai-projects")
 async def api_ai_projects(refresh: bool = False) -> dict:
     return await get_ai_projects(refresh=refresh)
+
+
+@app.get("/api/today")
+async def api_today() -> dict:
+    return await get_today()
 
 
 @app.get("/api/stocks")
@@ -118,6 +139,38 @@ async def api_delete_stock_watchlist_item(stock_id: str) -> dict:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+@app.get("/api/financials/sources")
+async def api_financial_sources() -> dict:
+    return financial_source_catalog()
+
+
+@app.get("/api/financials")
+async def api_financial_snapshot(market: str, symbol: str, cik: str = "") -> dict:
+    try:
+        return await get_financial_snapshot(market, symbol, cik)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/financials/sync")
+async def api_sync_financial_snapshot(
+    payload: dict[str, Any],
+    data_action: str | None = Header(None, alias="X-News-Digest-Data-Action"),
+) -> dict:
+    if data_action != "1":
+        raise HTTPException(status_code=403, detail="财报同步只允许由明确的本机交互触发")
+    try:
+        return await sync_financial_snapshot(
+            str(payload.get("market") or ""),
+            str(payload.get("symbol") or ""),
+            str(payload.get("cik") or ""),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except FinancialSourceError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
 @app.get("/api/commodities")
 async def api_commodities(refresh: bool = False) -> dict:
     return await get_commodities(refresh=refresh)
@@ -141,6 +194,87 @@ async def api_macro(refresh: bool = False) -> dict:
 @app.get("/api/games")
 async def api_games(refresh: bool = False) -> dict:
     return await get_games(refresh=refresh)
+
+
+@app.get("/api/games/watchlist")
+async def api_game_watchlist() -> dict:
+    try:
+        return await asyncio.to_thread(load_game_watchlist)
+    except WatchlistValidationError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@app.post("/api/games/watchlist/import")
+async def api_import_game_watchlist(payload: dict[str, Any]) -> dict:
+    try:
+        result = await asyncio.to_thread(
+            import_game_watchlist,
+            content=str(payload.get("content") or ""),
+            data_format=str(payload.get("format") or "json"),
+            mode=str(payload.get("mode") or "merge"),
+        )
+    except WatchlistValidationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    await invalidate_game_cache()
+    return result
+
+
+@app.put("/api/games/watchlist/{game_id}")
+async def api_update_game_watchlist_item(game_id: str, payload: dict[str, Any]) -> dict:
+    try:
+        result = await asyncio.to_thread(update_game_watchlist_item, game_id, payload)
+    except WatchlistNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except WatchlistValidationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    await invalidate_game_cache()
+    return result
+
+
+@app.delete("/api/games/watchlist/{game_id}")
+async def api_delete_game_watchlist_item(game_id: str) -> dict:
+    try:
+        result = await asyncio.to_thread(delete_game_watchlist_item, game_id)
+    except WatchlistNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except WatchlistValidationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    await invalidate_game_cache()
+    return result
+
+
+@app.post("/api/games/watchlist/regions")
+async def api_create_game_watchlist_region(payload: dict[str, Any]) -> dict:
+    try:
+        result = await asyncio.to_thread(create_game_watchlist_region, payload)
+    except WatchlistValidationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    await invalidate_game_cache()
+    return result
+
+
+@app.put("/api/games/watchlist/regions/{region_code}")
+async def api_update_game_watchlist_region(region_code: str, payload: dict[str, Any]) -> dict:
+    try:
+        result = await asyncio.to_thread(update_game_watchlist_region, region_code, payload)
+    except WatchlistNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except WatchlistValidationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    await invalidate_game_cache()
+    return result
+
+
+@app.delete("/api/games/watchlist/regions/{region_code}")
+async def api_delete_game_watchlist_region(region_code: str) -> dict:
+    try:
+        result = await asyncio.to_thread(delete_game_watchlist_region, region_code)
+    except WatchlistNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except WatchlistValidationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    await invalidate_game_cache()
+    return result
 
 
 @app.get("/api/games/region")
@@ -328,6 +462,11 @@ async def index() -> FileResponse:
 
 @app.get("/news")
 async def news_page() -> FileResponse:
+    return FileResponse(PUBLIC_DIR / "index.html")
+
+
+@app.get("/today")
+async def today_page() -> FileResponse:
     return FileResponse(PUBLIC_DIR / "index.html")
 
 

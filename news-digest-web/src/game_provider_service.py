@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import browser_service as bs
+from .game_watchlist_service import filter_rows_for_watchlist, load_watchlist
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 PROFILE_ROOT = ROOT_DIR / "data" / "game-provider-profiles"
@@ -174,8 +175,21 @@ def crawl_game_provider_rankings_sync(provider: str, country_code: str) -> dict[
         enforce_crawl_policy(provider, state)
         mark_attempt(provider, state)
         save_state(state)
-        rows = crawl_two_charts(provider, country_code)
-        merge_ranking_rows(rows)
+        fetched_rows = crawl_two_charts(provider, country_code)
+        catalog = load_watchlist()
+        rows, watchlist_warnings = filter_rows_for_watchlist(
+            fetched_rows,
+            source=provider,
+            catalog=catalog,
+        )
+        merge_ranking_rows(
+            rows,
+            replace_scopes={
+                (provider, country_code, "free"),
+                (provider, country_code, "grossing"),
+            },
+            catalog=catalog,
+        )
         saved = state.setdefault("providers", {}).setdefault(provider, {})
         now = datetime.now(UTC).isoformat()
         saved.update({"verifiedAt": now, "lastSuccessAt": now, "cooldownUntil": "", "lastError": ""})
@@ -184,10 +198,15 @@ def crawl_game_provider_rankings_sync(provider: str, country_code: str) -> dict[
             "provider": provider,
             "providerName": definition["name"],
             "countryCode": country_code,
+            "fetchedRows": len(fetched_rows),
             "rows": len(rows),
             "freeRows": len([row for row in rows if row.get("chart") == "free"]),
             "grossingRows": len([row for row in rows if row.get("chart") == "grossing"]),
-            "message": f"{definition['name']} {country_code.upper()} 榜单采集完成，共保存 {len(rows)} 条。",
+            "warnings": watchlist_warnings,
+            "message": (
+                f"{definition['name']} {country_code.upper()} 榜单采集完成，"
+                f"抓取 {len(fetched_rows)} 条，关注目录保存 {len(rows)} 条。"
+            ),
         }
     except GameProviderError as error:
         saved = state.setdefault("providers", {}).setdefault(provider, {})
@@ -401,7 +420,13 @@ def mark_attempt(provider: str, state: dict[str, Any]) -> None:
     saved["daily"] = daily
 
 
-def merge_ranking_rows(new_rows: list[dict[str, Any]], path: Path = RANKINGS_PATH) -> None:
+def merge_ranking_rows(
+    new_rows: list[dict[str, Any]],
+    path: Path = RANKINGS_PATH,
+    *,
+    replace_scopes: set[tuple[Any, Any, Any]] | None = None,
+    catalog: dict[str, Any] | None = None,
+) -> None:
     existing: list[dict[str, Any]] = []
     if path.exists():
         try:
@@ -410,7 +435,23 @@ def merge_ranking_rows(new_rows: list[dict[str, Any]], path: Path = RANKINGS_PAT
                 existing = [row for row in payload if isinstance(row, dict)]
         except (OSError, json.JSONDecodeError):
             existing = []
-    scopes = {(row.get("provider"), row.get("country_code"), row.get("chart")) for row in new_rows}
+    if catalog is not None:
+        watched_existing: list[dict[str, Any]] = []
+        for provider in PROVIDERS:
+            provider_rows = [row for row in existing if row.get("provider") == provider]
+            matched, _ = filter_rows_for_watchlist(provider_rows, source=provider, catalog=catalog)
+            watched_existing.extend(matched)
+        existing = watched_existing
+    scopes = replace_scopes
+    if scopes is None:
+        scopes = {
+            (
+                row.get("provider"),
+                row.get("country_code") or row.get("countryCode"),
+                row.get("chart"),
+            )
+            for row in new_rows
+        }
     merged = [
         row
         for row in existing

@@ -31,6 +31,7 @@ public/
 data/*.sqlite
 data/*.sqlite-*
 data/stock_watch_details.json
+data/financial_snapshots.json
 data/browser-profile/
 data/xueqiu-auth-profile/
 data/xueqiu-browser-profile/

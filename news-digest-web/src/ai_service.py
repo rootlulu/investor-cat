@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import html
 import json
@@ -11,19 +12,35 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 import httpx
+
+from .ai_discovery import (
+    CAPABILITY_META,
+    SURFACE_META,
+    USE_STAGE_META,
+    apply_project_history,
+    build_github_search_specs,
+    build_project_signals,
+    classify_ai_project,
+    enrich_discovery_score,
+    extract_readme_signals,
+    project_is_default_visible,
+    select_enrichment_candidates,
+)
+from .request_coordinator import coordinate_httpx_client
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT_DIR / "config" / "sources.json"
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 GITHUB_SEARCH_API = "https://api.github.com/search/repositories"
+GITHUB_REPOS_API = "https://api.github.com/repos"
 TRANSLATE_API = "https://translate.googleapis.com/translate_a/single"
 AI_SCHEMA_VERSION = 2
-AI_PROJECTS_SCHEMA_VERSION = 5
+AI_PROJECTS_SCHEMA_VERSION = 6
 WINDOW_DAYS = 7
 MAX_NEWS_PER_CATEGORY = 40
 MAX_NEWS_ITEMS = 200
@@ -116,10 +133,10 @@ GITHUB_PRODUCTIVITY_CATEGORIES = [
 GITHUB_PRODUCTIVITY_CATEGORY_BY_ID = {
     category["id"]: category for category in GITHUB_PRODUCTIVITY_CATEGORIES
 }
+GITHUB_SEARCH_SPECS = build_github_search_specs()
 GITHUB_PRODUCTIVITY_SEARCHES = [
-    (category["id"], query)
-    for category in GITHUB_PRODUCTIVITY_CATEGORIES
-    for query in category["queries"]
+    (spec["id"], spec["query"])
+    for spec in GITHUB_SEARCH_SPECS
 ]
 
 GITHUB_PROJECT_CATEGORY_OVERRIDES = {
@@ -224,16 +241,46 @@ async def get_ai_news(refresh: bool = False, allow_stale: bool = True, force: bo
         return data
 
 
+async def read_ai_news_snapshot() -> dict[str, Any] | None:
+    """Return the latest usable AI-news snapshot without starting external I/O."""
+
+    config = load_config()
+    ttl_seconds = refresh_interval_seconds(config)
+    cached = AI_NEWS_CACHE.get("data")
+    from_storage = False
+    if not isinstance(cached, dict) or not cached.get("items"):
+        cached = await load_snapshot(resolve_sqlite_path(config), "latest_ai_news")
+        from_storage = True
+    if not isinstance(cached, dict) or not cached.get("items"):
+        return None
+
+    snapshot = dict(cached)
+    schema_current = snapshot_is_valid(snapshot, "ai-news")
+    snapshot.update(
+        {
+            "cached": True,
+            "fromStorage": from_storage,
+            "throttled": False,
+            "stale": not schema_current or snapshot_expires_at(snapshot, ttl_seconds) <= datetime.now(UTC),
+        }
+    )
+    return snapshot
+
+
 async def get_ai_projects(refresh: bool = False, allow_stale: bool = True, force: bool = False) -> dict[str, Any]:
     config = load_config()
     db_path = resolve_sqlite_path(config)
     ttl_seconds = refresh_interval_seconds(config)
 
     cached = await read_memory_cache(AI_PROJECTS_CACHE, AI_PROJECTS_CACHE_LOCK, refresh, force)
+    if cached and cached.get("kind") == "ai-projects":
+        cached = migrate_ai_projects_snapshot(cached)
     if cached:
         return cached
 
     stored = await load_snapshot(db_path, "latest_ai_projects")
+    if stored and stored.get("kind") == "ai-projects":
+        stored = migrate_ai_projects_snapshot(stored)
     stored_compatible = bool(stored and stored.get("kind") == "ai-projects")
     stored_valid = snapshot_is_valid(stored, "ai-projects")
     stored_fresh = bool(stored_valid and snapshot_expires_at(stored, ttl_seconds) > datetime.now(UTC))
@@ -243,9 +290,13 @@ async def get_ai_projects(refresh: bool = False, allow_stale: bool = True, force
     async with AI_PROJECTS_FETCH_LOCK:
         if not force:
             cached = await read_memory_cache(AI_PROJECTS_CACHE, AI_PROJECTS_CACHE_LOCK, refresh, force)
+            if cached and cached.get("kind") == "ai-projects":
+                cached = migrate_ai_projects_snapshot(cached)
             if cached:
                 return cached
             stored = await load_snapshot(db_path, "latest_ai_projects")
+            if stored and stored.get("kind") == "ai-projects":
+                stored = migrate_ai_projects_snapshot(stored)
             stored_compatible = bool(stored and stored.get("kind") == "ai-projects")
             stored_valid = snapshot_is_valid(stored, "ai-projects")
             stored_fresh = bool(stored_valid and snapshot_expires_at(stored, ttl_seconds) > datetime.now(UTC))
@@ -277,6 +328,7 @@ async def fetch_ai_news_snapshot(ttl_seconds: int, previous: dict[str, Any] | No
         "Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
     }
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=httpx.Timeout(15.0)) as client:
+        coordinate_httpx_client(client)
         results = await asyncio.gather(
             *(fetch_google_news_query(client, category, query) for category, query in requests),
             return_exceptions=True,
@@ -433,10 +485,11 @@ async def fetch_ai_projects_snapshot(ttl_seconds: int, previous: dict[str, Any] 
         headers["Authorization"] = f"Bearer {token}"
 
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=httpx.Timeout(45.0)) as client:
+        coordinate_httpx_client(client)
         results = await asyncio.gather(
             *(
-                fetch_github_productivity_search(client, category_id, query)
-                for category_id, query in GITHUB_PRODUCTIVITY_SEARCHES
+                fetch_github_productivity_search(client, search_spec)
+                for search_spec in GITHUB_SEARCH_SPECS
             ),
             return_exceptions=True,
         )
@@ -445,11 +498,13 @@ async def fetch_ai_projects_snapshot(ttl_seconds: int, previous: dict[str, Any] 
     errors: list[str] = []
     rate_remaining: list[int] = []
     rate_resets: list[str] = []
+    successful_searches = 0
     for result in results:
         if isinstance(result, Exception):
             errors.append(short_error(result))
             continue
-        category_id, _query, rows, remaining, reset = result
+        successful_searches += 1
+        search_id, _query, discovery_mode, rows, remaining, reset = result
         if remaining is not None:
             rate_remaining.append(remaining)
         if reset:
@@ -460,15 +515,33 @@ async def fetch_ai_projects_snapshot(ttl_seconds: int, previous: dict[str, Any] 
                 continue
             existing = repositories.get(repo_id)
             if existing:
-                matched_categories = existing.setdefault("matchedCategories", [])
-                if category_id not in matched_categories:
-                    matched_categories.append(category_id)
+                matched_searches = existing.setdefault("matchedSearches", [])
+                if search_id not in matched_searches:
+                    matched_searches.append(search_id)
+                discovery_modes = existing.setdefault("discoveryModes", [])
+                if discovery_mode not in discovery_modes:
+                    discovery_modes.append(discovery_mode)
             else:
-                row["matchedCategories"] = [category_id]
+                row["matchedSearches"] = [search_id]
+                row["discoveryModes"] = [discovery_mode]
                 repositories[repo_id] = row
 
+    generated_at = datetime.now(UTC)
     projects = [normalize_github_project(row, 0) for row in repositories.values()]
-    if errors and previous:
+    current_project_keys = {github_project_key(project) for project in projects if github_project_key(project)}
+    previous_projects_by_key = {
+        github_project_key(project): project
+        for project in (previous or {}).get("projects", [])
+        if github_project_key(project)
+    }
+    for project in projects:
+        previous_project = previous_projects_by_key.get(github_project_key(project))
+        if not previous_project:
+            continue
+        for field in ("release", "readmeSignals", "enrichmentStatus"):
+            if previous_project.get(field) is not None:
+                project[field] = previous_project[field]
+    if errors and previous and successful_searches:
         merged_projects = {
             github_project_key(project): project
             for project in projects
@@ -479,6 +552,47 @@ async def fetch_ai_projects_snapshot(ttl_seconds: int, previous: dict[str, Any] 
             if project_key and project_key not in merged_projects:
                 merged_projects[project_key] = dict(previous_project)
         projects = list(merged_projects.values())
+
+    enrichment_targets = select_enrichment_candidates(projects, authenticated=bool(token))
+    enrichment_request_count = len(enrichment_targets) * 2
+    if enrichment_targets:
+        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=httpx.Timeout(30.0)) as client:
+            coordinate_httpx_client(client)
+            enrichment_results = await asyncio.gather(
+                *(
+                    fetch_github_project_enrichment(
+                        client,
+                        project,
+                        previous_projects_by_key.get(github_project_key(project)),
+                    )
+                    for project in enrichment_targets
+                ),
+                return_exceptions=True,
+            )
+        projects_by_key = {github_project_key(project): project for project in projects if github_project_key(project)}
+        for result in enrichment_results:
+            if isinstance(result, Exception):
+                errors.append(short_error(result))
+                continue
+            project_key, enrichment, enrichment_errors = result
+            if project_key in projects_by_key:
+                projects_by_key[project_key].update(enrichment)
+            errors.extend(enrichment_errors)
+
+    db_path = resolve_sqlite_path(load_config())
+    history_candidates = [project for project in projects if github_project_key(project) in current_project_keys]
+    await record_ai_project_history(db_path, history_candidates, observed_at=generated_at)
+    history_by_key = await load_ai_project_history(
+        db_path,
+        [github_project_key(project) for project in projects if github_project_key(project)],
+        now=generated_at,
+    )
+    for index, project in enumerate(projects):
+        project_key = github_project_key(project)
+        enriched = apply_project_history(project, history_by_key.get(project_key, []), now=generated_at)
+        enriched["signals"] = build_project_signals(enriched, now=generated_at)
+        projects[index] = enrich_discovery_score(enriched, now=generated_at)
+
     projects = select_github_productivity_projects(projects)
     previous_projects = {int(item.get("id") or 0): item for item in (previous or {}).get("projects", []) if item.get("id")}
     descriptions_to_translate = []
@@ -508,25 +622,16 @@ async def fetch_ai_projects_snapshot(ttl_seconds: int, previous: dict[str, Any] 
         else:
             translated_count += 1
         project["descriptionZh"] = concise_project_annotation(project["descriptionZh"])
-    generated_at = datetime.now(UTC)
+    signal_payload = {
+        "high": [signal for project in projects for signal in (project.get("signals") or {}).get("high", [])],
+        "digest": [signal for project in projects for signal in (project.get("signals") or {}).get("digest", [])],
+    }
     rate_limit = {
         "remaining": min(rate_remaining) if rate_remaining else None,
         "resetAt": max(rate_resets) if rate_resets else "",
         "authenticated": bool(token),
     }
-    category_counts = {
-        category["id"]: sum(1 for project in projects if project.get("productivityCategory") == category["id"])
-        for category in GITHUB_PRODUCTIVITY_CATEGORIES
-    }
-    categories = [
-        {
-            "id": category["id"],
-            "label": category["label"],
-            "description": category["description"],
-            "count": category_counts[category["id"]],
-        }
-        for category in GITHUB_PRODUCTIVITY_CATEGORIES
-    ]
+    facets = build_ai_project_facets(projects)
     return {
         "schemaVersion": AI_PROJECTS_SCHEMA_VERSION,
         "kind": "ai-projects",
@@ -538,19 +643,26 @@ async def fetch_ai_projects_snapshot(ttl_seconds: int, previous: dict[str, Any] 
         "stale": False,
         "throttled": False,
         "source": "GitHub Search API",
-        "sort": "category-stars",
+        "sort": "discovery-score",
         "limit": MAX_GITHUB_PROJECTS,
         "perCategoryLimit": MAX_GITHUB_PROJECTS_PER_CATEGORY,
-        "categories": categories,
-        "searches": [query for _category_id, query in GITHUB_PRODUCTIVITY_SEARCHES],
+        **facets,
+        "searches": [spec["query"] for spec in GITHUB_SEARCH_SPECS],
+        "searchSpecs": [dict(spec) for spec in GITHUB_SEARCH_SPECS],
         "summary": {
             "projectCount": len(projects),
             "candidateCount": len(repositories),
-            "categoryCount": sum(1 for count in category_counts.values() if count),
+            "defaultVisibleCount": sum(1 for project in projects if project_is_default_visible(project)),
+            "hiddenByDefaultCount": sum(1 for project in projects if not project_is_default_visible(project)),
             "translatedCount": translated_count,
+            "historyRecordedCount": len(history_candidates),
+            "enrichmentRequestCount": enrichment_request_count,
+            "highSignalCount": len(signal_payload["high"]),
+            "digestSignalCount": len(signal_payload["digest"]),
         },
         "rateLimit": rate_limit,
         "errors": list(dict.fromkeys(errors))[:20],
+        "signals": signal_payload,
         "projects": projects,
         "hasData": bool(projects),
     }
@@ -558,13 +670,27 @@ async def fetch_ai_projects_snapshot(ttl_seconds: int, previous: dict[str, Any] 
 
 async def fetch_github_productivity_search(
     client: httpx.AsyncClient,
-    category_id: str,
-    query: str,
-) -> tuple[str, str, list[dict[str, Any]], int | None, str]:
+    search_spec: dict[str, Any] | str,
+    query: str = "",
+) -> tuple[str, str, str, list[dict[str, Any]], int | None, str]:
+    if isinstance(search_spec, dict):
+        spec = search_spec
+    else:
+        spec = {
+            "id": search_spec,
+            "mode": "popular",
+            "query": query,
+            "sort": "stars",
+            "order": "desc",
+            "minStars": MIN_GITHUB_STARS,
+        }
+    search_id = str(spec.get("id") or "general")
+    search_query = str(spec.get("query") or "")
+    discovery_mode = str(spec.get("mode") or "popular")
     params = {
-        "q": f"{query} in:name,description,topics stars:>={MIN_GITHUB_STARS} archived:false fork:false",
-        "sort": "stars",
-        "order": "desc",
+        "q": f"{search_query} in:name,description,topics stars:>={int(spec.get('minStars') or MIN_GITHUB_STARS)} archived:false fork:false",
+        "sort": str(spec.get("sort") or "stars"),
+        "order": str(spec.get("order") or "desc"),
         "per_page": 100,
         "page": 1,
     }
@@ -572,11 +698,70 @@ async def fetch_github_productivity_search(
         response = await client.get(GITHUB_SEARCH_API, params=params)
         response.raise_for_status()
     except Exception as error:
-        raise RuntimeError(f"GitHub {category_id} search: {short_error(error)}") from error
+        raise RuntimeError(f"GitHub {search_id} search: {short_error(error)}") from error
     payload = response.json()
     remaining = safe_int(response.headers.get("x-ratelimit-remaining"))
     reset_at = epoch_to_iso(response.headers.get("x-ratelimit-reset"))
-    return category_id, query, payload.get("items") or [], remaining, reset_at
+    return search_id, search_query, discovery_mode, payload.get("items") or [], remaining, reset_at
+
+
+async def fetch_github_project_enrichment(
+    client: httpx.AsyncClient,
+    project: dict[str, Any],
+    previous: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any], list[str]]:
+    project_key = github_project_key(project)
+    full_name = str(project.get("fullName") or "").strip()
+    encoded_name = "/".join(quote(part, safe="") for part in full_name.split("/", 1))
+    release_url = f"{GITHUB_REPOS_API}/{encoded_name}/releases/latest"
+    readme_url = f"{GITHUB_REPOS_API}/{encoded_name}/readme"
+    responses = await asyncio.gather(client.get(release_url), client.get(readme_url), return_exceptions=True)
+    errors: list[str] = []
+    enrichment = {
+        "release": dict((previous or {}).get("release") or {}),
+        "readmeSignals": dict((previous or {}).get("readmeSignals") or {}),
+        "enrichmentStatus": "stale" if previous else "missing",
+    }
+
+    release_response = responses[0]
+    if isinstance(release_response, Exception):
+        errors.append(f"GitHub {full_name} release: {short_error(release_response)}")
+    elif release_response.status_code == 404:
+        enrichment["release"] = {}
+    else:
+        try:
+            release_response.raise_for_status()
+            release_payload = release_response.json()
+            enrichment["release"] = {
+                "tag": str(release_payload.get("tag_name") or ""),
+                "name": clean_text(release_payload.get("name") or "")[:160],
+                "url": str(release_payload.get("html_url") or ""),
+                "publishedAt": str(release_payload.get("published_at") or ""),
+                "createdAt": str(release_payload.get("created_at") or ""),
+                "prerelease": bool(release_payload.get("prerelease")),
+                "draft": bool(release_payload.get("draft")),
+            }
+            enrichment["enrichmentStatus"] = "fresh"
+        except Exception as error:
+            errors.append(f"GitHub {full_name} release: {short_error(error)}")
+
+    readme_response = responses[1]
+    if isinstance(readme_response, Exception):
+        errors.append(f"GitHub {full_name} README: {short_error(readme_response)}")
+    elif readme_response.status_code == 404:
+        enrichment["readmeSignals"] = {"hasInstall": False, "hasQuickstart": False, "hasDemo": False}
+    else:
+        try:
+            readme_response.raise_for_status()
+            readme_payload = readme_response.json()
+            encoded_content = str(readme_payload.get("content") or "").replace("\n", "")
+            readme_text = base64.b64decode(encoded_content, validate=False).decode("utf-8", errors="ignore")
+            enrichment["readmeSignals"] = extract_readme_signals(readme_text)
+            enrichment["enrichmentStatus"] = "fresh"
+        except Exception as error:
+            errors.append(f"GitHub {full_name} README: {short_error(error)}")
+
+    return project_key, enrichment, errors
 
 
 def normalize_github_project(row: dict[str, Any], rank: int) -> dict[str, Any]:
@@ -601,6 +786,8 @@ def normalize_github_project(row: dict[str, Any], rank: int) -> dict[str, Any]:
         "license": license_name,
         "topics": all_topics[:12],
         "matchedCategories": list(dict.fromkeys(row.get("matchedCategories") or [])),
+        "matchedSearches": list(dict.fromkeys(row.get("matchedSearches") or [])),
+        "discoveryModes": list(dict.fromkeys(row.get("discoveryModes") or [])),
         "owner": owner.get("login") or "",
         "ownerAvatar": owner.get("avatar_url") or "",
         "homepage": row.get("homepage") or "",
@@ -609,13 +796,14 @@ def normalize_github_project(row: dict[str, Any], rank: int) -> dict[str, Any]:
         "pushedAt": row.get("pushed_at") or "",
     }
     classification_source = {**project, "topics": all_topics}
-    project["projectType"], project["projectTypeDescription"] = classify_github_project(classification_source)
-    category = classify_github_productivity_category(classification_source)
-    if category:
-        project["productivityCategory"] = category[0]
-        project["productivityCategoryLabel"] = category[1]
-        project["productivityCategoryDescription"] = category[2]
-    return project
+    classification = classify_ai_project(classification_source)
+    classification["legacyCategory"] = github_legacy_category_id(classification_source, classification)
+    project.update(classification)
+    category = GITHUB_PRODUCTIVITY_CATEGORY_BY_ID[classification["legacyCategory"]]
+    project["productivityCategory"] = category["id"]
+    project["productivityCategoryLabel"] = category["label"]
+    project["productivityCategoryDescription"] = category["description"]
+    return enrich_discovery_score(project)
 
 
 def github_project_key(project: dict[str, Any]) -> str:
@@ -626,121 +814,33 @@ def github_project_key(project: dict[str, Any]) -> str:
     return f"name:{full_name}" if full_name else ""
 
 
-def classify_github_productivity_category(project: dict[str, Any]) -> tuple[str, str, str] | None:
+def github_legacy_category_id(project: dict[str, Any], classification: dict[str, Any]) -> str:
     full_name = str(project.get("fullName") or project.get("full_name") or "").casefold()
-    description = str(project.get("description") or "").casefold()
-    topics = {str(topic).casefold() for topic in (project.get("topics") or [])}
-    combined = " ".join([full_name, description, *sorted(topics)])
-
-    category_id = GITHUB_PROJECT_CATEGORY_OVERRIDES.get(full_name)
-    if not category_id:
-        skill_topics = {"skills", "agent-skills", "ai-skills", "claude-code-skills", "codex-skills"}
-        mcp_topics = {"mcp", "mcp-server", "mcp-servers", "model-context-protocol"}
-        agent_topics = {
-            "agents",
-            "ai-agent",
-            "ai-agents",
-            "agentic-ai",
-            "autonomous-agents",
-            "browser-agent",
-            "coding-agent",
-            "personal-assistant",
-            "research-agent",
-            "writing-assistant",
-        }
-        framework_topics = {
-            "agent-framework",
-            "agent-frameworks",
-            "agent-orchestration",
-            "multi-agent",
-            "multi-agent-systems",
-        }
-        workflow_topics = {"code-review", "context-engineering", "prompt-engineering", "spec-driven-development"}
-        if (
-            skill_topics & topics
-            or re.search(r"\bskills?\b", combined)
-            or any(phrase in combined for phrase in ("agent skill", "claude code skill", "codex skill"))
-        ):
-            category_id = "skills"
-        elif (
-            mcp_topics & topics
-            or "model context protocol" in combined
-            or re.search(r"\bmcp\b", combined)
-        ):
-            category_id = "mcp"
-        elif workflow_topics & topics or any(
-            phrase in combined
-            for phrase in (
-                "context engineering",
-                "code review",
-                "spec-driven",
-                "prompt engineering",
-                "system prompt",
-                "prompt library",
-                "developer workflow",
-                "coding workflow",
-                "agent memory",
-                "design.md",
-            )
-        ):
-            category_id = "dev-workflows"
-        elif (
-            framework_topics & topics
-            or any(
-                phrase in combined
-                for phrase in (
-                    "agent framework",
-                    "agentic framework",
-                    "agent orchestration",
-                    "agent sdk",
-                    "build ai agents",
-                    "building ai agents",
-                    "deep agents",
-                    "deepagents",
-                    "framework for ai agents",
-                    "framework for building agents",
-                    "framework to build agents",
-                    "multi-agent framework",
-                    "sdk for ai agents",
-                )
-            )
-        ):
-            category_id = "agent-frameworks"
-        elif (
-            agent_topics & topics
-            or any(
-                phrase in combined
-                for phrase in (
-                    "ai agent",
-                    "autonomous agent",
-                    "browser agent",
-                    "coding agent",
-                    "coding assistant",
-                    "content agent",
-                    "deep research agent",
-                    "general purpose agent",
-                    "general-purpose agent",
-                    "personal assistant",
-                    "research agent",
-                    "software engineering agent",
-                    "terminal coding agent",
-                    "web agent",
-                    "writer agent",
-                    "writing agent",
-                )
-            )
-            or re.search(r"/(?:autogpt|codex|claude-code|gpt-researcher|openmanus|aider|openhands|cline|roo-code)(?:$|[\s/_-])", full_name)
-        ):
-            category_id = "coding-agents"
-
-    if not category_id:
-        matched_categories = [
-            str(value)
-            for value in (project.get("matchedCategories") or [])
-            if str(value) in GITHUB_PRODUCTIVITY_CATEGORY_BY_ID
+    combined = " ".join(
+        [
+            full_name,
+            str(project.get("description") or "").casefold(),
+            *(str(topic).casefold() for topic in (project.get("topics") or [])),
         ]
-        category_id = matched_categories[0] if matched_categories else ""
+    )
+    override = GITHUB_PROJECT_CATEGORY_OVERRIDES.get(full_name)
+    if override:
+        return override
+    if any(phrase in combined for phrase in ("code review", "context engineering", "prompt engineering", "spec-driven")):
+        return "dev-workflows"
+    if classification.get("useStage") == "build" and any(
+        phrase in combined
+        for phrase in ("agent framework", "agent orchestration", "framework for building ai agents", "multi-agent framework")
+    ):
+        return "agent-frameworks"
+    return str(classification.get("legacyCategory") or "coding-agents")
 
+
+def classify_github_productivity_category(project: dict[str, Any]) -> tuple[str, str, str] | None:
+    classification = classify_ai_project(project)
+    if classification["useStage"] == "train_research":
+        return None
+    category_id = github_legacy_category_id(project, classification)
     category = GITHUB_PRODUCTIVITY_CATEGORY_BY_ID.get(category_id)
     if not category:
         return None
@@ -751,36 +851,38 @@ def select_github_productivity_projects(projects: list[dict[str, Any]]) -> list[
     candidates_by_key: dict[str, dict[str, Any]] = {}
     for source_project in projects:
         project = dict(source_project)
-        category = classify_github_productivity_category(project)
         project_key = github_project_key(project)
-        if not category or not project_key:
+        if not project_key:
             continue
-        project["productivityCategory"] = category[0]
-        project["productivityCategoryLabel"] = category[1]
-        project["productivityCategoryDescription"] = category[2]
-        project["projectType"] = category[1]
-        project["projectTypeDescription"] = category[2]
+        classification = classify_ai_project(project)
+        classification["legacyCategory"] = github_legacy_category_id(project, classification)
+        project.update(classification)
+        category = GITHUB_PRODUCTIVITY_CATEGORY_BY_ID[classification["legacyCategory"]]
+        project["productivityCategory"] = category["id"]
+        project["productivityCategoryLabel"] = category["label"]
+        project["productivityCategoryDescription"] = category["description"]
+        project = enrich_discovery_score(project)
         existing = candidates_by_key.get(project_key)
-        if not existing or int(project.get("stars") or 0) > int(existing.get("stars") or 0):
+        if not existing or float(project.get("discoveryScore") or 0) > float(existing.get("discoveryScore") or 0):
             candidates_by_key[project_key] = project
 
-    sort_key = lambda project: (int(project.get("stars") or 0), int(project.get("forks") or 0))
+    sort_key = lambda project: (
+        float(project.get("discoveryScore") or 0),
+        int(project.get("stars7dDelta") or 0),
+        int(project.get("stars") or 0),
+        int(project.get("forks") or 0),
+    )
     category_ids = [category["id"] for category in GITHUB_PRODUCTIVITY_CATEGORIES]
-    selected: dict[str, dict[str, Any]] = {}
-    for category_id in category_ids:
-        bucket = sorted(
-            (
-                project
-                for project in candidates_by_key.values()
-                if project.get("productivityCategory") == category_id
-            ),
-            key=sort_key,
-            reverse=True,
-        )
-        for project in bucket[:MAX_GITHUB_PROJECTS_PER_CATEGORY]:
-            selected[github_project_key(project)] = project
-
-    ranked = sorted(selected.values(), key=sort_key, reverse=True)[:MAX_GITHUB_PROJECTS]
+    candidates = list(candidates_by_key.values())
+    default_projects = sorted((project for project in candidates if project_is_default_visible(project)), key=sort_key, reverse=True)
+    hidden_projects = sorted((project for project in candidates if not project_is_default_visible(project)), key=sort_key, reverse=True)
+    default_limit = min(len(default_projects), 110)
+    hidden_limit = min(len(hidden_projects), MAX_GITHUB_PROJECTS - default_limit)
+    ranked = sorted(
+        [*default_projects[:default_limit], *hidden_projects[:hidden_limit]],
+        key=sort_key,
+        reverse=True,
+    )[:MAX_GITHUB_PROJECTS]
     category_ranks = {category_id: 0 for category_id in category_ids}
     for rank, project in enumerate(ranked, start=1):
         project["rank"] = rank
@@ -790,148 +892,122 @@ def select_github_productivity_projects(projects: list[dict[str, Any]]) -> list[
     return ranked
 
 
-def classify_github_project(project: dict[str, Any]) -> tuple[str, str]:
-    full_name = str(project.get("fullName") or "").casefold()
-    description = str(project.get("description") or "").casefold()
-    topics = {str(topic).casefold() for topic in (project.get("topics") or [])}
-    combined = " ".join([full_name, description, *sorted(topics)])
+def build_ai_project_facets(projects: list[dict[str, Any]]) -> dict[str, Any]:
+    category_counts = {
+        category["id"]: sum(1 for project in projects if project.get("productivityCategory") == category["id"])
+        for category in GITHUB_PRODUCTIVITY_CATEGORIES
+    }
+    stage_counts = {
+        stage_id: sum(1 for project in projects if project.get("useStage") == stage_id)
+        for stage_id in USE_STAGE_META
+    }
+    capability_counts = {
+        capability_id: sum(1 for project in projects if capability_id in (project.get("capabilityTags") or []))
+        for capability_id in CAPABILITY_META
+    }
+    surface_counts = {
+        surface_id: sum(1 for project in projects if surface_id in (project.get("deliverySurfaces") or []))
+        for surface_id in SURFACE_META
+    }
+    return {
+        "categories": [
+            {
+                "id": category["id"],
+                "label": category["label"],
+                "description": category["description"],
+                "count": category_counts[category["id"]],
+            }
+            for category in GITHUB_PRODUCTIVITY_CATEGORIES
+        ],
+        "useStages": [
+            {
+                "id": stage_id,
+                **stage_meta,
+                "count": stage_counts[stage_id],
+            }
+            for stage_id, stage_meta in USE_STAGE_META.items()
+        ],
+        "capabilities": [
+            {"id": capability_id, **meta, "count": capability_counts[capability_id]}
+            for capability_id, meta in CAPABILITY_META.items()
+        ],
+        "deliverySurfaces": [
+            {"id": surface_id, **meta, "count": surface_counts[surface_id]}
+            for surface_id, meta in SURFACE_META.items()
+        ],
+        "discoveryViews": [
+            {
+                "id": "recommended",
+                "label": "推荐",
+                "count": sum(1 for project in projects if project_is_default_visible(project)),
+            },
+            {
+                "id": "new",
+                "label": "新项目",
+                "count": sum(1 for project in projects if "recent" in (project.get("discoveryModes") or [])),
+            },
+            {
+                "id": "rising",
+                "label": "上升最快",
+                "count": sum(1 for project in projects if int(project.get("stars7dDelta") or 0) > 0),
+            },
+            {"id": "followed", "label": "我的关注", "count": 0},
+        ],
+    }
 
-    rules: list[tuple[bool, str, str]] = [
-        (
-            bool(re.search(r"(?:^|[\s/_-])mcp(?:$|[\s/_-])|model context protocol", combined)),
-            "MCP",
-            "模型上下文协议服务或工具",
-        ),
-        (
-            bool(re.search(r"(?:^|[\s/_-])skills?(?:$|[\s/_-])", combined)),
-            "Skills",
-            "AI 技能、插件或能力扩展",
-        ),
-        (
-            bool({"agent-framework", "agent-frameworks", "multi-agent", "multi-agent-systems"} & topics)
-            or any(
-                keyword in combined
-                for keyword in (
-                    "agent framework",
-                    "agent orchestration",
-                    "build ai agents",
-                    "building ai agents",
-                    "deepagents",
-                    "multi-agent framework",
-                )
-            ),
-            "Agent 框架",
-            "AI 智能体构建、编排或运行框架",
-        ),
-        (
-            bool(
-                {
-                    "agents",
-                    "ai-agent",
-                    "ai-agents",
-                    "agentic-ai",
-                    "autonomous-agents",
-                    "browser-agent",
-                    "coding-agent",
-                    "research-agent",
-                    "writing-assistant",
-                }
-                & topics
-            )
-            or any(
-                keyword in combined
-                for keyword in (
-                    "ai agent",
-                    "autonomous agent",
-                    "browser agent",
-                    "coding agent",
-                    "coding assistant",
-                    "content agent",
-                    "personal assistant",
-                    "research agent",
-                    "software engineering agent",
-                    "web agent",
-                    "writer agent",
-                    "writing agent",
-                )
-            )
-            or re.search(r"/(?:autogpt|codex|claude-code|gpt-researcher|openmanus|aider|openhands|cline|roo-code)(?:$|[\s/_-])", full_name),
-            "智能体",
-            "可直接完成编程、写作、研究、浏览器操作等任务的 AI 智能体",
-        ),
-        (
-            "prompt" in combined or "context engineering" in combined,
-            "提示词",
-            "提示词、上下文工程与资源库",
-        ),
-        (
-            "rag" in topics or "retrieval-augmented" in combined or "enterprise search" in combined,
-            "RAG",
-            "知识库检索与问答应用",
-        ),
-        (
-            any(keyword in combined for keyword in ("fine-tun", "finetun", "llamafactory", "model training")),
-            "模型训练",
-            "大模型训练、微调或评估工具",
-        ),
-        (
-            bool({"large-language-models", "llm", "transformers", "generative-ai"} & topics)
-            or any(keyword in combined for keyword in ("large language model", "transformer", "llm")),
-            "大模型",
-            "大模型开发、推理或应用框架",
-        ),
-        (
-            any(keyword in combined for keyword in ("stable diffusion", "image generation", "deepfake", "face swap")),
-            "生成式视觉",
-            "AI 图片、视频生成或换脸工具",
-        ),
-        (
-            bool({"computer-vision", "object-detection", "image-classification", "ocr"} & topics)
-            or any(keyword in combined for keyword in ("computer vision", "object detection", "opencv", "yolo", "ocr", "face recognition")),
-            "计算机视觉",
-            "图像识别、检测、分割或 OCR",
-        ),
-        (
-            any(keyword in combined for keyword in ("text-to-speech", "voice clon", "speech", "tts")),
-            "语音 AI",
-            "语音合成、识别或声音克隆",
-        ),
-        (
-            any(keyword in combined for keyword in ("for beginners", "course", "tutorial", "lessons", "100-days", "from scratch")),
-            "学习教程",
-            "AI、机器学习课程或示例代码",
-        ),
-        (
-            "gateway" in combined,
-            "AI 网关",
-            "管理 API 与模型调用流量",
-        ),
-        (
-            any(keyword in combined for keyword in ("quant", "finance", "financial", "investment")),
-            "金融 AI",
-            "金融数据、研究或量化投资平台",
-        ),
-        (
-            any(keyword in combined for keyword in ("observability", "monitoring")),
-            "可观测性",
-            "AI 系统监控与全栈可观测工具",
-        ),
-        (
-            bool({"machine-learning", "deep-learning", "neural-network"} & topics)
-            or any(keyword in combined for keyword in ("machine learning", "deep learning", "neural network")),
-            "机器学习",
-            "机器学习或深度学习框架",
-        ),
-        (
-            any(keyword in combined for keyword in ("workflow", "pipeline", "data app", "streamlit")),
-            "开发平台",
-            "AI 应用、数据流程或工作流开发",
-        ),
-    ]
-    for matched, label, explanation in rules:
-        if matched:
-            return label, explanation
-    return "AI 工具", "通用 AI 开源项目或开发工具"
+
+def migrate_ai_projects_snapshot(
+    data: dict[str, Any],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if data.get("kind") != "ai-projects":
+        return data
+    source_version = int(data.get("schemaVersion") or 0)
+    if source_version == AI_PROJECTS_SCHEMA_VERSION:
+        return data
+    if source_version > AI_PROJECTS_SCHEMA_VERSION:
+        return data
+
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    current = current.astimezone(UTC)
+    migrated_projects: list[dict[str, Any]] = []
+    for source_project in data.get("projects") or []:
+        project = dict(source_project)
+        classification = classify_ai_project(project)
+        classification["legacyCategory"] = github_legacy_category_id(project, classification)
+        project.update(classification)
+        category = GITHUB_PRODUCTIVITY_CATEGORY_BY_ID[project["legacyCategory"]]
+        project["productivityCategory"] = category["id"]
+        project["productivityCategoryLabel"] = category["label"]
+        project["productivityCategoryDescription"] = category["description"]
+        migrated_projects.append(enrich_discovery_score(project, now=current))
+
+    projects = select_github_productivity_projects(migrated_projects)
+    summary = dict(data.get("summary") or {})
+    summary.update(
+        {
+            "projectCount": len(projects),
+            "defaultVisibleCount": sum(1 for project in projects if project_is_default_visible(project)),
+            "hiddenByDefaultCount": sum(1 for project in projects if not project_is_default_visible(project)),
+        }
+    )
+    return {
+        **data,
+        "schemaVersion": AI_PROJECTS_SCHEMA_VERSION,
+        "migratedFromSchemaVersion": source_version,
+        "sort": "discovery-score",
+        **build_ai_project_facets(projects),
+        "summary": summary,
+        "projects": projects,
+        "hasData": bool(projects),
+    }
+
+
+def classify_github_project(project: dict[str, Any]) -> tuple[str, str]:
+    classification = classify_ai_project(project)
+    return classification["projectType"], classification["projectTypeDescription"]
 
 
 async def read_memory_cache(
@@ -978,6 +1054,135 @@ async def load_snapshot(db_path: Path, table: str) -> dict[str, Any] | None:
 async def save_snapshot(db_path: Path, table: str, data: dict[str, Any]) -> None:
     async with DB_LOCK:
         await asyncio.to_thread(save_snapshot_sync, db_path, table, data)
+
+
+async def record_ai_project_history(
+    db_path: Path,
+    projects: list[dict[str, Any]],
+    observed_at: datetime | None = None,
+) -> None:
+    async with DB_LOCK:
+        await asyncio.to_thread(record_ai_project_history_sync, db_path, projects, observed_at)
+
+
+async def load_ai_project_history(
+    db_path: Path,
+    project_keys: list[str],
+    now: datetime | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    async with DB_LOCK:
+        return await asyncio.to_thread(load_ai_project_history_sync, db_path, project_keys, now)
+
+
+def ensure_ai_project_history_table(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_project_history (
+                project_key TEXT NOT NULL,
+                observed_date TEXT NOT NULL,
+                stars INTEGER NOT NULL,
+                forks INTEGER NOT NULL,
+                pushed_at TEXT NOT NULL,
+                release_at TEXT NOT NULL,
+                release_tag TEXT NOT NULL,
+                PRIMARY KEY (project_key, observed_date)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_project_history_date ON ai_project_history(observed_date)"
+        )
+
+
+def record_ai_project_history_sync(
+    db_path: Path,
+    projects: list[dict[str, Any]],
+    observed_at: datetime | None = None,
+) -> None:
+    observed = observed_at or datetime.now(UTC)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=UTC)
+    observed = observed.astimezone(UTC)
+    observed_date = observed.date().isoformat()
+    retention_cutoff = (observed.date() - timedelta(days=120)).isoformat()
+    rows = []
+    for project in projects:
+        project_key = github_project_key(project)
+        if not project_key:
+            continue
+        release = project.get("release") if isinstance(project.get("release"), dict) else {}
+        rows.append(
+            (
+                project_key,
+                observed_date,
+                int(project.get("stars") or 0),
+                int(project.get("forks") or 0),
+                str(project.get("pushedAt") or ""),
+                str(release.get("publishedAt") or ""),
+                str(release.get("tag") or ""),
+            )
+        )
+    ensure_ai_project_history_table(db_path)
+    with sqlite3.connect(db_path) as connection:
+        if rows:
+            connection.executemany(
+                """
+                INSERT INTO ai_project_history (
+                    project_key, observed_date, stars, forks, pushed_at, release_at, release_tag
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_key, observed_date) DO UPDATE SET
+                    stars = excluded.stars,
+                    forks = excluded.forks,
+                    pushed_at = excluded.pushed_at,
+                    release_at = excluded.release_at,
+                    release_tag = excluded.release_tag
+                """,
+                rows,
+            )
+        connection.execute("DELETE FROM ai_project_history WHERE observed_date < ?", (retention_cutoff,))
+
+
+def load_ai_project_history_sync(
+    db_path: Path,
+    project_keys: list[str],
+    now: datetime | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    unique_keys = list(dict.fromkeys(key for key in project_keys if key))
+    result = {key: [] for key in unique_keys}
+    if not unique_keys or not db_path.exists():
+        return result
+    ensure_ai_project_history_table(db_path)
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    cutoff = (current.astimezone(UTC).date() - timedelta(days=120)).isoformat()
+    with sqlite3.connect(db_path) as connection:
+        for offset in range(0, len(unique_keys), 500):
+            chunk = unique_keys[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = connection.execute(
+                f"""
+                SELECT project_key, observed_date, stars, forks, pushed_at, release_at, release_tag
+                FROM ai_project_history
+                WHERE observed_date >= ? AND project_key IN ({placeholders})
+                ORDER BY observed_date ASC
+                """,
+                (cutoff, *chunk),
+            ).fetchall()
+            for project_key, observed_date, stars, forks, pushed_at, release_at, release_tag in rows:
+                result[project_key].append(
+                    {
+                        "observedDate": observed_date,
+                        "stars": stars,
+                        "forks": forks,
+                        "pushedAt": pushed_at,
+                        "releaseAt": release_at,
+                        "releaseTag": release_tag,
+                    }
+                )
+    return result
 
 
 def load_snapshot_sync(db_path: Path, table: str) -> dict[str, Any] | None:
@@ -1136,6 +1341,7 @@ async def translate_many_to_chinese(texts: list[str], max_output_chars: int = 16
         "Referer": "https://translate.google.com/",
     }
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=httpx.Timeout(12.0)) as client:
+        coordinate_httpx_client(client)
         for index in range(0, len(unique_texts), 6):
             batch = unique_texts[index : index + 6]
             try:

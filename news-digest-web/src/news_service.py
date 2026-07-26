@@ -15,6 +15,8 @@ from xml.etree import ElementTree
 
 import httpx
 
+from .request_coordinator import coordinate_httpx_client
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT_DIR / "config" / "sources.json"
 CACHE_LOCK = asyncio.Lock()
@@ -717,6 +719,7 @@ async def get_news(refresh: bool = False, allow_stale: bool = True, force: bool 
         follow_redirects=True,
         timeout=httpx.Timeout(request_state.timeout),
     ) as client:
+        coordinate_httpx_client(client, retries=False)
         tasks = [
             asyncio.wait_for(
                 fetch_source(source, since, client, request_state),
@@ -741,6 +744,7 @@ async def get_news(refresh: bool = False, allow_stale: bool = True, force: bool 
         follow_redirects=True,
         timeout=httpx.Timeout(request_state.timeout),
     ) as translate_client:
+        coordinate_httpx_client(translate_client, retries=False)
         translated_titles = await translate_titles(candidate_items, translate_client, request_state)
     ranked = sorted(
         (enrich_item(item, translated_titles.get(item.get("title", ""))) for item in candidate_items),

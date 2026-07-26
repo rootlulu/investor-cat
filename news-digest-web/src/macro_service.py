@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 import sqlite3
@@ -13,11 +14,14 @@ from urllib.parse import urljoin
 import httpx
 
 from .commodity_service import load_config, resolve_sqlite_path, user_agent
+from .investment_catalog import bounded_history, build_macro_metadata
+from .investment_quality import build_metric_quality, quality_summary
+from .request_coordinator import coordinate_httpx_client
 
 MACRO_CACHE_LOCK = asyncio.Lock()
 DB_LOCK = asyncio.Lock()
 MACRO_CACHE: dict[str, Any] = {"expires_at": datetime.min.replace(tzinfo=UTC), "data": None}
-MACRO_SCHEMA_VERSION = 6
+MACRO_SCHEMA_VERSION = 7
 
 COUNTRY_ORDER = ["china", "us", "japan", "europe"]
 NBS_RELEASE_LIST_URL = "https://www.stats.gov.cn/sj/zxfb/"
@@ -26,6 +30,31 @@ NBS_PRODUCTION_MATERIAL_FALLBACK_URL = "https://www.stats.gov.cn/sj/zxfb/202606/
 NBS_PRODUCTION_MATERIAL_FALLBACK_PERIOD = "2026-06上旬"
 NBS_PRODUCTION_MATERIAL_FALLBACK_PREVIOUS = "2026-05下旬"
 NBS_PRODUCTION_MATERIAL_FALLBACK_SUMMARY = {"up": 14, "down": 33, "flat": 3}
+MACRO_SOURCE_URLS = {
+    "BLS": "https://www.bls.gov/",
+    "BOJ": "https://www.boj.or.jp/en/",
+    "ECB": "https://www.ecb.europa.eu/stats/html/index.en.html",
+    "Eurostat": "https://ec.europa.eu/eurostat/web/main/data/database",
+    "Fed": "https://www.federalreserve.gov/data.htm",
+    "HCOB / S&P Global": "https://www.spglobal.com/marketintelligence/en/mi/products/pmi.html",
+    "ISM": "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/",
+    "Jibun Bank": "https://www.spglobal.com/marketintelligence/en/mi/products/pmi.html",
+    "MLIT": "https://www.mlit.go.jp/en/statistics/index.html",
+    "NBS": NBS_RELEASE_LIST_URL,
+    "PBOC": "https://www.pbc.gov.cn/en/3688006/index.html",
+    "S&P Dow Jones": "https://www.spglobal.com/spdji/en/",
+    "SHIBOR": "https://www.shibor.org/",
+    "Statistics Bureau": "https://www.stat.go.jp/english/data/index.html",
+    "全国银行间同业拆借中心": "https://www.chinamoney.com.cn/chinese/",
+    "财政部": "https://www.mof.gov.cn/",
+    "财新 / S&P Global": "https://www.spglobal.com/marketintelligence/en/mi/products/pmi.html",
+}
+MACRO_COUNTRY_SOURCE_URLS = {
+    "china": NBS_RELEASE_LIST_URL,
+    "us": "https://www.federalreserve.gov/data.htm",
+    "japan": "https://www.stat.go.jp/english/data/index.html",
+    "europe": "https://ec.europa.eu/eurostat/web/main/data/database",
+}
 NBS_PRODUCTION_MATERIAL_FALLBACK_ROWS: list[tuple[str, str, str, float, float, float]] = [
     ("黑色金属", "螺纹钢（Φ20mm，HRB400E）", "吨", 3243.9, -21.8, -0.7),
     ("黑色金属", "线材（Φ8—10mm，HPB300）", "吨", 3404.5, -23.2, -0.7),
@@ -95,6 +124,7 @@ def item(
     forecast_probability: str | None = None,
     forecast_period: str | None = None,
     forecast_source: str | None = None,
+    source_url: str | None = None,
 ) -> dict[str, Any]:
     row = {
         "id": id,
@@ -117,6 +147,8 @@ def item(
         row["forecastPeriod"] = forecast_period
     if forecast_source is not None:
         row["forecastSource"] = forecast_source
+    if source_url is not None:
+        row["sourceUrl"] = source_url
     return row
 
 
@@ -513,6 +545,7 @@ def build_nbs_production_material_group(
                 str(row.get("category") or "生产资料"),
                 source,
                 "；".join(part for part in note_parts if part),
+                source_url=str(metadata.get("url") or NBS_PRODUCTION_MATERIAL_FALLBACK_URL),
             )
         )
     return {
@@ -656,7 +689,53 @@ def build_macro_countries(extra_groups_by_country: dict[str, list[dict[str, Any]
             for row in group.get("items", []):
                 row["history"] = build_history(country_id, row)
                 apply_forecast(country_id, row)
+                row.update(build_macro_metadata(country_id, row))
+                row["history"] = bounded_history(row["history"], limit=row["historyLimit"])
+                attach_macro_quality(country_id, row)
     return repair_mojibake(countries)
+
+
+def attach_macro_quality(country_id: str, row: dict[str, Any]) -> None:
+    source_url = str(
+        row.get("sourceUrl")
+        or MACRO_SOURCE_URLS.get(str(row.get("source") or ""))
+        or MACRO_COUNTRY_SOURCE_URLS.get(country_id)
+        or NBS_RELEASE_LIST_URL
+    )
+    row["sourceUrl"] = source_url
+    row["unit"] = str(row.get("unit") or "指数点")
+    value = row.get("value")
+    is_dynamic_material = str(row.get("id") or "").startswith("nbs_material_")
+    is_fallback = "内置兜底" in str(row.get("note") or "")
+    status = "unavailable" if value is None else "ok" if is_dynamic_material and not is_fallback else "stale"
+    if status == "ok":
+        flags: list[str] = []
+    elif status == "stale":
+        flags = ["配置型参考快照；未连接该指标的实时官方发布接口"]
+    else:
+        flags = ["当前值未披露"]
+    row["quality"] = build_metric_quality(
+        value=value,
+        unit=row["unit"],
+        as_of=str(row.get("period") or "未披露"),
+        source_url=source_url,
+        definition=f"{row.get('name') or row.get('id') or '宏观指标'}；{row.get('note') or '官方或已配置来源口径'}",
+        method="observed",
+        status=status,
+        quality_flags=flags,
+    )
+
+
+def build_macro_quality_summary(countries: list[dict[str, Any]]) -> dict[str, int]:
+    return quality_summary(
+        [
+            {"quality": row.get("quality")}
+            for country in countries
+            for group in country.get("groups") or []
+            for row in group.get("items") or []
+            if isinstance(row, dict)
+        ]
+    )
 
 
 def apply_forecast(country_id: str, row: dict[str, Any]) -> None:
@@ -733,7 +812,7 @@ async def get_macro(refresh: bool = False, allow_stale: bool = True, force: bool
             cached["throttled"] = False
             return cached
 
-    stored = await load_latest_macro(db_path)
+    stored = upgrade_macro_snapshot(await load_latest_macro(db_path))
     stored_schema_valid = bool(stored and stored.get("schemaVersion") == MACRO_SCHEMA_VERSION)
     stored_is_fresh = bool(stored_schema_valid and parse_dt(stored.get("expiresAt")) > datetime.now(UTC))
     if not force and stored and stored_schema_valid and ((allow_stale and not refresh) or stored_is_fresh):
@@ -750,6 +829,7 @@ async def get_macro(refresh: bool = False, allow_stale: bool = True, force: bool
     dynamic_groups: dict[str, list[dict[str, Any]]] = {}
     timeout = float(fetch_config.get("request_timeout_seconds", 8))
     async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(timeout)) as client:
+        coordinate_httpx_client(client)
         production_material_group, production_material_error = await fetch_nbs_production_material_group(client)
     if production_material_group:
         dynamic_groups.setdefault("china", []).append(production_material_group)
@@ -757,6 +837,7 @@ async def get_macro(refresh: bool = False, allow_stale: bool = True, force: bool
         errors.append(production_material_error)
 
     now = datetime.now(UTC)
+    countries = build_macro_countries(dynamic_groups)
     data = {
         "schemaVersion": MACRO_SCHEMA_VERSION,
         "generatedAt": now.isoformat(),
@@ -769,7 +850,8 @@ async def get_macro(refresh: bool = False, allow_stale: bool = True, force: bool
         "source": "官方统计口径 / 已配置宏观观察池 / 国家统计局流通领域生产资料价格旬报",
         "cadence": "半小时最多刷新一次；流通领域生产资料价格按国家统计局旬报更新",
         "errors": errors,
-        "countries": build_macro_countries(dynamic_groups),
+        "qualitySummary": build_macro_quality_summary(countries),
+        "countries": countries,
     }
     data = repair_mojibake(data)
     await save_latest_macro(db_path, data)
@@ -777,6 +859,31 @@ async def get_macro(refresh: bool = False, allow_stale: bool = True, force: bool
         MACRO_CACHE["data"] = data
         MACRO_CACHE["expires_at"] = parse_dt(data["expiresAt"])
     return data
+
+
+def upgrade_macro_snapshot(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    snapshot = copy.deepcopy(data)
+    previous_schema = snapshot.get("schemaVersion")
+    for country in snapshot.get("countries") or []:
+        if not isinstance(country, dict):
+            continue
+        country_id = str(country.get("id") or "")
+        for group in country.get("groups") or []:
+            if not isinstance(group, dict):
+                continue
+            for row in group.get("items") or []:
+                if not isinstance(row, dict):
+                    continue
+                row.update(build_macro_metadata(country_id, row))
+                row["history"] = bounded_history(row.get("history") or [], limit=row["historyLimit"])
+                attach_macro_quality(country_id, row)
+    snapshot["qualitySummary"] = build_macro_quality_summary(snapshot.get("countries") or [])
+    if previous_schema != MACRO_SCHEMA_VERSION:
+        snapshot["legacySchemaVersion"] = previous_schema
+    snapshot["schemaVersion"] = MACRO_SCHEMA_VERSION
+    return snapshot
 
 
 async def load_latest_macro(db_path: Path) -> dict[str, Any] | None:

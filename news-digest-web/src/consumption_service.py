@@ -13,6 +13,8 @@ from urllib.parse import urljoin
 
 import httpx
 
+from .request_coordinator import coordinate_httpx_client
+
 from .commodity_service import load_config, resolve_sqlite_path
 
 CONSUMPTION_CACHE_LOCK = asyncio.Lock()
@@ -726,6 +728,7 @@ async def get_consumption(refresh: bool = False, allow_stale: bool = True, force
     errors: list[str] = []
     timeout = float(fetch_config.get("request_timeout_seconds", 8))
     async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(timeout), verify=False) as client:
+        coordinate_httpx_client(client)
         tasks = [
             fetch_nbs_social_retail(client, rows),
             fetch_nbs_cpi(client, rows),

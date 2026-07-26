@@ -12,12 +12,16 @@ from urllib.parse import urljoin
 
 import httpx
 
+from .investment_catalog import bounded_history, build_energy_metadata
+from .investment_quality import build_metric_quality, quality_summary
+from .request_coordinator import coordinate_httpx_client
+
 from .commodity_service import clean_html, load_config, parse_dt, resolve_sqlite_path, safe_float, user_agent
 
 ENERGY_CACHE_LOCK = asyncio.Lock()
 DB_LOCK = asyncio.Lock()
 ENERGY_CACHE: dict[str, Any] = {"expires_at": datetime.min.replace(tzinfo=UTC), "data": None}
-ENERGY_SCHEMA_VERSION = 3
+ENERGY_SCHEMA_VERSION = 5
 ENERGY_HISTORY_POINTS = 18
 ENERGY_RELEASE_LINK_LIMIT = 24
 
@@ -141,7 +145,7 @@ async def get_energy(refresh: bool = False, allow_stale: bool = True, force: boo
             cached["throttled"] = False
             return cached
 
-    stored = await load_latest_energy(db_path)
+    stored = upgrade_energy_snapshot(await load_latest_energy(db_path))
     stored_schema_valid = bool(stored and stored.get("schemaVersion") == ENERGY_SCHEMA_VERSION)
     stored_is_fresh = bool(stored_schema_valid and parse_dt(stored.get("expiresAt", "")) > datetime.now(UTC))
     if not force and stored and stored_schema_valid and ((allow_stale and not refresh) or stored_is_fresh):
@@ -160,16 +164,28 @@ async def get_energy(refresh: bool = False, allow_stale: bool = True, force: boo
     industrial_release_url = FALLBACK_INDUSTRIAL_RELEASE_URL
     timeout = float(fetch_config.get("request_timeout_seconds", 8))
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(timeout), verify=False) as client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(timeout)) as client:
+        coordinate_httpx_client(client)
+        index_pages = await fetch_nbs_release_index_pages(client)
         try:
-            energy_links = await find_nbs_release_links(client, "能源生产情况", limit=1)
+            energy_links = await find_nbs_release_links(
+                client,
+                "能源生产情况",
+                limit=1,
+                index_pages=index_pages,
+            )
             if energy_links:
                 energy_release_url = energy_links[0]["url"]
         except Exception as error:
             errors.append(f"能源生产发布页索引失败：{error}")
 
         try:
-            industrial_links = await find_nbs_release_links(client, "规模以上工业增加值增长", limit=ENERGY_RELEASE_LINK_LIMIT)
+            industrial_links = await find_nbs_release_links(
+                client,
+                "规模以上工业增加值增长",
+                limit=ENERGY_RELEASE_LINK_LIMIT,
+                index_pages=index_pages,
+            )
             if industrial_links:
                 industrial_release_url = industrial_links[0]["url"]
             else:
@@ -207,6 +223,7 @@ async def get_energy(refresh: bool = False, allow_stale: bool = True, force: boo
             {"label": "规模以上工业生产主要数据", "url": industrial_release_url},
         ],
         "summary": build_summary(rows),
+        "qualitySummary": quality_summary([{"quality": row.get("quality")} for row in rows if isinstance(row.get("quality"), dict)]),
         "sections": build_sections(rows),
         "rows": rows,
     }
@@ -217,6 +234,51 @@ async def get_energy(refresh: bool = False, allow_stale: bool = True, force: boo
     return data
 
 
+async def read_energy_snapshot() -> dict[str, Any] | None:
+    """Return the latest usable energy snapshot without starting external I/O."""
+
+    config = load_config()
+    cached = upgrade_energy_snapshot(ENERGY_CACHE.get("data"))
+    from_storage = False
+    if not isinstance(cached, dict) or not (cached.get("rows") or cached.get("sections")):
+        cached = upgrade_energy_snapshot(await load_latest_energy(resolve_sqlite_path(config)))
+        from_storage = True
+    if not isinstance(cached, dict) or not (cached.get("rows") or cached.get("sections")):
+        return None
+
+    snapshot = dict(cached)
+    schema_current = snapshot.get("schemaVersion") == ENERGY_SCHEMA_VERSION
+    snapshot.update(
+        {
+            "cached": True,
+            "fromStorage": from_storage,
+            "throttled": False,
+            "stale": not schema_current or parse_dt(snapshot.get("expiresAt", "")) <= datetime.now(UTC),
+        }
+    )
+    return snapshot
+
+
+def upgrade_energy_snapshot(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    snapshot = copy.deepcopy(data)
+    previous_schema = snapshot.get("schemaVersion")
+    rows = [row for row in snapshot.get("rows") or [] if isinstance(row, dict)]
+    finalize_rows(rows)
+    snapshot["rows"] = rows
+    snapshot["sections"] = build_sections(rows)
+    snapshot["summary"] = build_summary(rows)
+    snapshot["qualitySummary"] = quality_summary(
+        [{"quality": row.get("quality")} for row in rows if isinstance(row.get("quality"), dict)]
+    )
+    snapshot["hasData"] = bool(rows)
+    if previous_schema != ENERGY_SCHEMA_VERSION:
+        snapshot["legacySchemaVersion"] = previous_schema
+    snapshot["schemaVersion"] = ENERGY_SCHEMA_VERSION
+    return snapshot
+
+
 def build_fallback_rows() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for definition in METRIC_DEFINITIONS:
@@ -224,9 +286,9 @@ def build_fallback_rows() -> list[dict[str, Any]]:
         latest = history[-1] if history else {}
         cumulative = FALLBACK_CUMULATIVE.get(definition["id"], {})
         has_estimated_history = any(point.get("estimated") for point in history)
-        note = "规模以上工业月度产品产量；环比按当月绝对量与上月绝对量计算。"
+        note = "规模以上工业月度产品产量；环比仅在相邻两月均为实测值时计算。"
         if has_estimated_history:
-            note += "；断网兜底时，K线早期月份用最近发布值和同比反推生成趋势种子，刷新成功后会被统计局历史覆盖。"
+            note += "；早期估算点只作虚线背景，不进入环比、信号或概要指标，刷新成功后由统计局实测历史替换。"
         rows.append(
             {
                 "id": definition["id"],
@@ -257,7 +319,16 @@ def build_fallback_history(metric_id: str, seed_history: list[dict[str, Any]]) -
         key=lambda point: str(point.get("period") or ""),
     )
     if len(seed) < 2:
+        for point in seed:
+            point["method"] = "estimated" if point.get("estimated") else "observed"
         return seed
+
+    for point in seed:
+        if point.get("estimated"):
+            point["method"] = "estimated"
+            point.setdefault("formula", "fallback seed estimate")
+        else:
+            point["method"] = "observed"
 
     anchors: dict[str, dict[str, Any]] = {str(point["period"]): point for point in seed}
     for point in seed:
@@ -276,6 +347,8 @@ def build_fallback_history(metric_id: str, seed_history: list[dict[str, Any]]) -
                 "periodLabel": month_label(prior_period),
                 "value": round(value / denominator, 1),
                 "estimated": True,
+                "method": "estimated",
+                "formula": "current observed value / (1 + published YoY)",
             },
         )
 
@@ -300,9 +373,21 @@ def build_fallback_history(metric_id: str, seed_history: list[dict[str, Any]]) -
                 "periodLabel": month_label(period),
                 "value": value,
                 "estimated": True,
+                "method": "estimated",
+                "formula": fallback_estimation_formula(period, known_values),
             }
         )
     return result
+
+
+def fallback_estimation_formula(period: str, known_values: list[tuple[int, float | None]]) -> str:
+    target = period_to_index(period)
+    known = [(index, value) for index, value in known_values if value is not None]
+    before = [item for item in known if item[0] <= target]
+    after = [item for item in known if item[0] >= target]
+    if before and after:
+        return "linear interpolation between nearest seeded months"
+    return "nearest seeded month extrapolated at 0.3% per month"
 
 
 def estimate_fallback_value(period: str, known_values: list[tuple[int, float | None]]) -> float | None:
@@ -347,13 +432,29 @@ def month_label(period: str) -> str:
     return f"{month}月"
 
 
-async def find_nbs_release_links(client: httpx.AsyncClient, keyword: str, limit: int = 6) -> list[dict[str, str]]:
-    found: dict[str, dict[str, str]] = {}
+async def fetch_nbs_release_index_pages(
+    client: httpx.AsyncClient,
+) -> list[tuple[str, str]]:
+    pages: list[tuple[str, str]] = []
     for index_url in NBS_RELEASE_INDEXES:
         try:
             html = await fetch_text(client, index_url, "国家统计局索引")
         except Exception:
             continue
+        pages.append((index_url, html))
+    return pages
+
+
+async def find_nbs_release_links(
+    client: httpx.AsyncClient,
+    keyword: str,
+    limit: int = 6,
+    *,
+    index_pages: list[tuple[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    found: dict[str, dict[str, str]] = {}
+    pages = index_pages if index_pages is not None else await fetch_nbs_release_index_pages(client)
+    for index_url, html in pages:
         for link in extract_release_links(html, keyword, index_url):
             found.setdefault(link["url"], link)
     links = list(found.values())
@@ -494,31 +595,52 @@ def append_history_point(target: dict[str, Any], update: dict[str, Any]) -> None
             point[key] = update[key]
     if update.get("value") is not None:
         point.pop("estimated", None)
+        point.pop("formula", None)
+        point["method"] = "observed"
 
 
 def finalize_rows(rows: list[dict[str, Any]]) -> None:
     for row in rows:
+        row.update(build_energy_metadata(str(row.get("id") or ""), str(row.get("category") or "")))
         history = sorted(row.get("history") or [], key=lambda point: str(point.get("period") or ""))
         for index, point in enumerate(history):
             value = safe_float(point.get("value"))
             if value is None:
                 continue
+            method = "estimated" if point.get("estimated") or point.get("method") == "estimated" else "observed"
+            point["method"] = method
             previous_value = safe_float(history[index - 1].get("value")) if index > 0 else None
             previous_is_monthly = index > 0 and is_monthly_point(history[index - 1])
             current_is_monthly = is_monthly_point(point)
-            if point.get("mom") is None and previous_value not in (None, 0) and previous_is_monthly and current_is_monthly:
+            previous_is_observed = index > 0 and history[index - 1].get("method") == "observed" and not history[index - 1].get("estimated")
+            if method != "observed" or not previous_is_observed:
+                point.pop("mom", None)
+            elif point.get("mom") is None and previous_value not in (None, 0) and previous_is_monthly and current_is_monthly:
                 point["mom"] = round((value / previous_value - 1) * 100, 2)
+            for key in ["open", "high", "low", "close"]:
+                point.pop(key, None)
+            formula = str(point.get("formula") or "") if method == "estimated" else None
+            point["quality"] = build_metric_quality(
+                value=value,
+                unit=str(row.get("unit") or "未披露"),
+                as_of=str(point.get("period") or "未知"),
+                source_url=str(row.get("sourceUrl") or FALLBACK_INDUSTRIAL_RELEASE_URL),
+                definition=f"{row.get('name') or row.get('id') or '能源指标'}月度产量/发电量",
+                method=method,
+                status="partial" if method == "estimated" else "ok",
+                formula=formula,
+                quality_flags=["估算点不参与环比、信号或概要指标"] if method == "estimated" else [],
+            )
 
-            open_value = previous_value if previous_value is not None and previous_is_monthly and current_is_monthly else value
-            point["open"] = open_value
-            point["close"] = value
-            point["high"] = max(open_value, value)
-            point["low"] = min(open_value, value)
-
-        row["history"] = history[-ENERGY_HISTORY_POINTS:]
+        row["history"] = bounded_history(history, limit=ENERGY_HISTORY_POINTS)
         latest = next((point for point in reversed(history) if point.get("period") == row.get("period")), None)
-        if latest and latest.get("mom") is not None:
-            row["mom"] = latest["mom"]
+        if latest:
+            row["method"] = latest.get("method") or "observed"
+            row["quality"] = latest.get("quality")
+            if latest.get("method") == "observed" and latest.get("mom") is not None:
+                row["mom"] = latest["mom"]
+            else:
+                row["mom"] = None
 
 
 def is_monthly_point(point: dict[str, Any]) -> bool:
@@ -549,6 +671,17 @@ def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     categories = {row.get("category") for row in rows if row.get("category")}
     source_urls = {row.get("sourceUrl") for row in rows if row.get("sourceUrl")}
     power_rows = [row for row in rows if row.get("category") == "电力"]
+    estimated_point_count = sum(
+        1
+        for row in rows
+        for point in row.get("history") or []
+        if point.get("method") == "estimated" or point.get("estimated")
+    )
+    actual_history_count = sum(
+        1
+        for row in rows
+        if any(point.get("method") == "observed" and not point.get("estimated") for point in row.get("history") or [])
+    )
     return {
         "latestPeriod": latest_period,
         "categoryCount": len(categories),
@@ -556,7 +689,9 @@ def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "coalCount": sum(1 for row in rows if row.get("category") == "煤炭"),
         "oilGasCount": sum(1 for row in rows if row.get("category") == "油气"),
         "powerCount": len(power_rows),
-        "klineCount": sum(1 for row in rows if len(row.get("history") or []) >= 2),
+        "klineCount": 0,
+        "actualHistoryCount": actual_history_count,
+        "estimatedPointCount": estimated_point_count,
         "sourceCount": len(source_urls),
     }
 

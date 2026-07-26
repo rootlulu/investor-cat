@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import csv
 import hashlib
 import io
@@ -24,7 +25,9 @@ import xml.etree.ElementTree as ET
 import httpx
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
+from .investment_quality import quality_summary
+from .request_coordinator import DomainCoolingDown, coordinate_httpx_client, coordinate_requests_session
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT_DIR / "config" / "sources.json"
@@ -32,7 +35,7 @@ DB_LOCK = asyncio.Lock()
 STOCK_CACHE_LOCK = asyncio.Lock()
 STOCK_CACHE: dict[str, Any] = {"expires_at": datetime.min.replace(tzinfo=UTC), "data": None}
 INDUSTRY_FINANCING_GROUP_LOCKS: dict[str, asyncio.Lock] = {}
-STOCK_SCHEMA_VERSION = 15
+STOCK_SCHEMA_VERSION = 16
 CN_TZ = timezone(timedelta(hours=8))
 try:
     US_EASTERN_TZ = ZoneInfo("America/New_York")
@@ -54,6 +57,7 @@ BROWSER_CLIENT_HINTS = '"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome
 
 EASTMONEY = "https://push2.eastmoney.com"
 EASTMONEY_HIS = "https://push2his.eastmoney.com"
+EASTMONEY_DELAY = "https://push2delay.eastmoney.com"
 EASTMONEY_BKZJ_URL = "https://data.eastmoney.com/bkzj/"
 EASTMONEY_STOCK_STATS_API = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 EASTMONEY_STOCK_STATS_URL = "https://data.eastmoney.com/cjsj/gpjytj.html"
@@ -63,7 +67,7 @@ EASTMONEY_BUYBACK_URL = "https://data.eastmoney.com/gphg/"
 EASTMONEY_SHAREHOLDER_CHANGE_URL = "https://data.eastmoney.com/executive/gdzjc.html"
 EASTMONEY_INSTITUTION_HOLDINGS_URL = "https://data.eastmoney.com/zlsj/jj.html"
 EASTMONEY_NATIONAL_TEAM_URL = "https://data.eastmoney.com/gjdcg/"
-EASTMONEY_ETF_LIST_API = "https://push2delay.eastmoney.com/api/qt/clist/get"
+EASTMONEY_ETF_LIST_API = f"{EASTMONEY_DELAY}/api/qt/clist/get"
 EASTMONEY_A_SHARE_LIST_URL = "https://quote.eastmoney.com/center/gridlist.html#hs_a_board"
 EASTMONEY_FUND_HOLDINGS_API = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
 PRIVATE_FUND_Q1_SOURCE_URL = "https://finance.eastmoney.com/a/202605063728332280.html"
@@ -346,6 +350,130 @@ WORLD_ETFS = [
 ]
 
 
+def market_component_has_data(market: Any) -> bool:
+    return isinstance(market, dict) and (
+        safe_float(market.get("marketCap")) is not None
+        or any(isinstance(item, dict) and safe_float(item.get("close")) is not None for item in market.get("indices") or [])
+    )
+
+
+def merge_markets_with_previous(
+    current: list[dict[str, Any]],
+    previous: list[dict[str, Any]],
+    reason: str,
+) -> list[dict[str, Any]]:
+    previous_by_id = {
+        str(market.get("id") or ""): market
+        for market in previous
+        if market_component_has_data(market)
+    }
+    merged: list[dict[str, Any]] = []
+    for market in current:
+        market_id = str(market.get("id") or "")
+        if market_component_has_data(market) or market_id not in previous_by_id:
+            merged.append(market)
+            continue
+        retained = copy.deepcopy(previous_by_id[market_id])
+        retained["status"] = "stale"
+        retained["stale"] = True
+        retained["staleReason"] = reason
+        retained["note"] = "；".join(filter(None, [str(retained.get("note") or ""), f"本轮刷新失败，保留上一版：{reason}"]))
+        merged.append(retained)
+    return merged
+
+
+def merge_institution_allocation_with_previous(current: dict[str, Any], previous: Any) -> dict[str, Any]:
+    if not isinstance(previous, dict) or not previous.get("categories"):
+        return current
+    current_categories = current.get("categories") if isinstance(current, dict) else []
+    previous_categories = previous.get("categories") or []
+    current_errors = current.get("errors") if isinstance(current, dict) else []
+    if current_categories and len(current_categories) >= len(previous_categories) and not current_errors:
+        return current
+
+    retained = copy.deepcopy(previous)
+    reason = "；".join(str(error) for error in current_errors or ["本轮机构配置未返回完整类别"] if str(error))
+    retained["status"] = "stale"
+    retained["stale"] = True
+    retained["staleReason"] = reason
+    retained["errors"] = list(dict.fromkeys([*(retained.get("errors") or []), *(current_errors or []), reason]))
+    return retained
+
+
+def merge_marginal_signals_with_previous(current: dict[str, Any], previous: Any) -> dict[str, Any]:
+    if not isinstance(previous, dict):
+        return current
+    previous_cards = {
+        str(card.get("id") or ""): card
+        for card in previous.get("cards") or []
+        if isinstance(card, dict) and card.get("status") in {"ok", "stale"} and card.get("metrics")
+    }
+    result = copy.deepcopy(current)
+    merged_cards: list[dict[str, Any]] = []
+    for card in result.get("cards") or []:
+        card_id = str(card.get("id") or "")
+        if card.get("status") not in {"unavailable", "error", "empty"} or card_id not in previous_cards:
+            merged_cards.append(card)
+            continue
+        retained = copy.deepcopy(previous_cards[card_id])
+        retained["status"] = "stale"
+        retained["stale"] = True
+        retained["staleReason"] = str(card.get("note") or "本轮刷新失败")
+        retained["note"] = "；".join(filter(None, [str(retained.get("note") or ""), f"本轮刷新失败，保留上一版：{retained['staleReason']}"]))
+        merged_cards.append(retained)
+    result["cards"] = merged_cards
+    return result
+
+
+def build_stock_quality_summary(data: dict[str, Any]) -> dict[str, int]:
+    """Summarize independent stock page components without treating missing values as zero."""
+
+    records: list[dict[str, Any]] = []
+    for market in data.get("markets") or []:
+        if not isinstance(market, dict):
+            continue
+        status = str(market.get("status") or "").lower()
+        if status not in {"ok", "stale", "partial", "empty", "unsupported", "error", "unavailable", "invalid"}:
+            status = "stale" if market.get("stale") else "ok" if market_component_has_data(market) else "unavailable"
+        records.append({"quality": {"status": status, "method": "observed"}})
+
+    marginal = data.get("marginalSignals") if isinstance(data.get("marginalSignals"), dict) else {}
+    for card in marginal.get("cards") or []:
+        if not isinstance(card, dict):
+            continue
+        status = str(card.get("status") or "unavailable").lower()
+        if status not in {"ok", "stale", "partial", "empty", "unsupported", "error", "unavailable", "invalid"}:
+            status = "unavailable"
+        records.append({"quality": {"status": status, "method": "derived"}})
+
+    trend = data.get("industryFinancingTrend") if isinstance(data.get("industryFinancingTrend"), dict) else {}
+    trend_status = str(trend.get("status") or "").lower()
+    if trend_status not in {"ok", "stale", "partial", "empty", "unsupported", "error", "unavailable", "invalid"}:
+        trend_status = "ok" if trend.get("dates") else "unavailable"
+    records.append({"quality": {"status": trend_status, "method": "derived"}})
+
+    allocation = data.get("institutionIndustryAllocation") if isinstance(data.get("institutionIndustryAllocation"), dict) else {}
+    allocation_status = str(allocation.get("status") or "").lower()
+    if allocation_status not in {"ok", "stale", "partial", "empty", "unsupported", "error", "unavailable", "invalid"}:
+        if allocation.get("errors") and not allocation.get("categories"):
+            allocation_status = "error"
+        elif allocation.get("errors"):
+            allocation_status = "partial"
+        else:
+            allocation_status = "ok" if allocation.get("categories") else "unavailable"
+    records.append({"quality": {"status": allocation_status, "method": "derived"}})
+    return quality_summary(records)
+
+
+def classify_stock_diagnostics(errors: list[str], fallback_warnings: list[str]) -> dict[str, list[str]]:
+    """Keep successful fallback notices separate from failed source reads."""
+
+    return {
+        "errors": list(dict.fromkeys(str(error).strip() for error in errors if str(error).strip())),
+        "warnings": list(dict.fromkeys(str(warning).strip() for warning in fallback_warnings if str(warning).strip())),
+    }
+
+
 async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: bool = False) -> dict[str, Any]:
     config = load_config()
     fetch_config = config.get("fetch", {})
@@ -363,15 +491,17 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
             cached["cached"] = True
             cached["fromStorage"] = False
             cached["throttled"] = False
+            cached["qualitySummary"] = build_stock_quality_summary(cached)
             return cached
 
-    stored = await load_latest_stocks(db_path)
+    stored = upgrade_stock_snapshot(await load_latest_stocks(db_path))
     stored_schema_valid = bool(stored and stored.get("schemaVersion") == STOCK_SCHEMA_VERSION)
     if stored and stored_schema_valid and has_stock_payload(stored) and not refresh:
         stored["cached"] = True
         stored["fromStorage"] = True
         stored["throttled"] = False
         stored["stale"] = effective_expires_at(stored, ttl_seconds) <= datetime.now(UTC)
+        stored["qualitySummary"] = build_stock_quality_summary(stored)
         async with STOCK_CACHE_LOCK:
             STOCK_CACHE["data"] = stored
             STOCK_CACHE["expires_at"] = effective_expires_at(stored, ttl_seconds)
@@ -394,6 +524,7 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
         stored["fromStorage"] = True
         stored["throttled"] = refresh
         stored["stale"] = not stored_is_fresh
+        stored["qualitySummary"] = build_stock_quality_summary(stored)
         async with STOCK_CACHE_LOCK:
             STOCK_CACHE["data"] = stored
             STOCK_CACHE["expires_at"] = effective_expires_at(stored, ttl_seconds)
@@ -411,6 +542,7 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
         follow_redirects=True,
         timeout=httpx.Timeout(request_state.timeout),
     ) as client:
+        coordinate_httpx_client(client, retries=False)
         try:
             china = await fetch_china_market(client, request_state)
         except Exception as error:
@@ -422,11 +554,18 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
             errors.append(f"世界股票数据：{error}")
             world = empty_world()
 
+    market_error = ""
     try:
         markets = await asyncio.to_thread(fetch_market_overviews_sync, db_path, request_state.timeout)
     except Exception as error:
-        errors.append(f"市场流动性数据：{error}")
+        market_error = str(error)
+        errors.append(f"市场流动性数据：{market_error}")
         markets = empty_markets()
+    markets = merge_markets_with_previous(
+        markets,
+        (stored or {}).get("markets") or [],
+        market_error or "本轮市场分项未返回有效数据",
+    )
 
     previous_industry_financing = (stored or {}).get("industryFinancingTrend")
     try:
@@ -450,6 +589,10 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
     except Exception as error:
         errors.append(f"机构行业占比：{error}")
         institution_allocation = empty_institution_industry_allocation(str(error))
+    institution_allocation = merge_institution_allocation_with_previous(
+        institution_allocation,
+        (stored or {}).get("institutionIndustryAllocation"),
+    )
 
     try:
         marginal_signals = await asyncio.to_thread(
@@ -460,9 +603,13 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
     except Exception as error:
         errors.append(f"A股边际信号：{error}")
         marginal_signals = empty_marginal_signals(str(error))
+    marginal_signals = merge_marginal_signals_with_previous(
+        marginal_signals,
+        (stored or {}).get("marginalSignals"),
+    )
 
-    warnings = china.pop("_warnings", []) if isinstance(china, dict) else []
-    errors.extend(warnings)
+    fallback_warnings = china.pop("_warnings", []) if isinstance(china, dict) else []
+    diagnostics = classify_stock_diagnostics(errors, fallback_warnings)
 
     now = datetime.now(UTC)
     data = {
@@ -476,7 +623,7 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
         "hasData": False,
         "source": "TradingView Scanner / SSE与SZSE官方统计 / 东方财富融资融券、行业两融明细、回购及增减持 / 同花顺行业资金流向 / 上交所ETF与期权统计 / 中国货币网回购定盘利率 / CFFEX日统计 / FINRA Margin Statistics / SFC Financial Review / 东方财富机构持仓 / 天天基金 ETF 持仓",
         "cadence": "半小时最多真实抓取一次",
-        "errors": errors,
+        **diagnostics,
         "markets": markets,
         "industryFinancingTrend": industry_financing_trend,
         "marginalSignals": marginal_signals,
@@ -485,11 +632,13 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
         "world": world,
     }
     data["hasData"] = has_stock_payload(data)
+    data["qualitySummary"] = build_stock_quality_summary(data)
 
     if not data["hasData"] and stored and has_stock_payload(stored):
         stored["cached"] = True
         stored["fromStorage"] = True
         stored["stale"] = True
+        stored["qualitySummary"] = build_stock_quality_summary(stored)
         return stored
 
     if data["hasData"]:
@@ -498,6 +647,46 @@ async def get_stocks(refresh: bool = False, allow_stale: bool = True, force: boo
             STOCK_CACHE["data"] = data
             STOCK_CACHE["expires_at"] = parse_dt(data["expiresAt"])
     return data
+
+
+async def read_stock_snapshot() -> dict[str, Any] | None:
+    """Return the latest usable stock snapshot without starting external I/O."""
+
+    config = load_config()
+    ttl_seconds = int(config.get("fetch", {}).get("min_refresh_interval_seconds", 1800))
+    cached = upgrade_stock_snapshot(STOCK_CACHE.get("data"))
+    from_storage = False
+    if not isinstance(cached, dict) or not has_stock_payload(cached):
+        cached = upgrade_stock_snapshot(await load_latest_stocks(resolve_sqlite_path(config)))
+        from_storage = True
+    if not isinstance(cached, dict) or not has_stock_payload(cached):
+        return None
+
+    snapshot = dict(cached)
+    schema_current = snapshot.get("schemaVersion") == STOCK_SCHEMA_VERSION
+    snapshot.update(
+        {
+            "cached": True,
+            "fromStorage": from_storage,
+            "throttled": False,
+            "stale": not schema_current or effective_expires_at(snapshot, ttl_seconds) <= datetime.now(UTC),
+        }
+    )
+    snapshot["qualitySummary"] = build_stock_quality_summary(snapshot)
+    return snapshot
+
+
+def upgrade_stock_snapshot(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    snapshot = copy.deepcopy(data)
+    previous_schema = snapshot.get("schemaVersion")
+    snapshot["hasData"] = has_stock_payload(snapshot)
+    snapshot["qualitySummary"] = build_stock_quality_summary(snapshot)
+    if previous_schema != STOCK_SCHEMA_VERSION:
+        snapshot["legacySchemaVersion"] = previous_schema
+    snapshot["schemaVersion"] = STOCK_SCHEMA_VERSION
+    return snapshot
 
 
 async def get_industry_financing_group(
@@ -946,7 +1135,7 @@ def fetch_industry_financing_trend_sync(
     )
     query_start = industry_financing_query_start(previous_for_merge, window_start)
     own_session = session is None
-    session = session or requests.Session()
+    session = session or new_browser_session()
 
     try:
         rows = fetch_industry_financing_rows_sync(
@@ -1404,6 +1593,8 @@ async def fetch_eastmoney_json(
                 if not text:
                     raise RuntimeError("empty response")
                 return json.loads(text)
+            except DomainCoolingDown:
+                raise
             except Exception as error:
                 last_error = error
                 if attempt < request_state.retries:
@@ -1574,21 +1765,10 @@ def new_browser_session() -> requests.Session:
             "Sec-CH-UA-Platform": '"Windows"',
         }
     )
-    retry = Retry(
-        total=2,
-        connect=2,
-        read=2,
-        status=2,
-        backoff_factor=0.6,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET", "HEAD", "POST"}),
-        respect_retry_after_header=True,
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=8)
+    adapter = HTTPAdapter(max_retries=0, pool_connections=8, pool_maxsize=8)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    return session
+    return coordinate_requests_session(session)
 
 
 def warm_browser_session(session: requests.Session, landing_url: str, timeout: float) -> None:
@@ -2141,6 +2321,9 @@ def fetch_etf_category_sync(
     successful.sort(key=lambda row: value_or_zero(row.get("f20")), reverse=True)
     failed_names.sort()
     industry_map = fetch_stock_industry_map_sync(session, set(holdings_by_code), timeout)
+    if not industry_map:
+        raise RuntimeError("ETF 成分行业映射暂未取到")
+    unmapped_count = len(set(holdings_by_code) - set(industry_map))
     values: dict[str, float] = {}
     level_two_values: dict[str, dict[str, float]] = {}
     for code, market_value in holdings_by_code.items():
@@ -2154,6 +2337,7 @@ def fetch_etf_category_sync(
     selected_cap = sum(value_or_zero(row.get("f20")) for row in successful)
     selected_names = "、".join(str(row.get("f14") or row.get("f12")) for row in successful)
     failure_note = f"；{len(failed_names)} 只未取得目标季报" if failed_names else ""
+    mapping_note = f"；{unmapped_count} 只成分行业暂未映射，归入未分类" if unmapped_count else ""
     return institution_category(
         category_id="etf",
         label="股票 ETF",
@@ -2163,7 +2347,7 @@ def fetch_etf_category_sync(
         total_count=len(eligible),
         source="东方财富 ETF 行情 / 天天基金持仓明细",
         source_url="https://fund.eastmoney.com/data/fundranking.html#tETF",
-        note=f"按当前规模选取头部 {ETF_SAMPLE_SIZE} 只境内股票 ETF，并聚合目标报告期全部披露股票持仓；样本：{selected_names}{failure_note}。",
+        note=f"按当前规模选取头部 {ETF_SAMPLE_SIZE} 只境内股票 ETF，并聚合目标报告期全部披露股票持仓；样本：{selected_names}{failure_note}{mapping_note}。",
         coverage_label="样本 ETF 当前规模覆盖",
         coverage_pct=selected_cap / eligible_cap * 100 if eligible_cap else None,
         level_two_values=level_two_values,
@@ -2300,11 +2484,11 @@ def fetch_stock_industry_map_sync(
 ) -> dict[str, str]:
     industry_map: dict[str, str] = {}
     ordered_codes = sorted(code for code in codes if re.fullmatch(r"\d{6}", code))
-    for offset in range(0, len(ordered_codes), 60):
-        chunk = ordered_codes[offset : offset + 60]
+
+    def fetch_chunk(chunk: list[str]) -> list[dict[str, Any]]:
         secids = ",".join(f"{'1' if code.startswith(('5', '6', '9')) else '0'}.{code}" for code in chunk)
         response = session.get(
-            f"{EASTMONEY}/api/qt/ulist.np/get",
+            f"{EASTMONEY_DELAY}/api/qt/ulist.np/get",
             params={
                 "fltt": "2",
                 "secids": secids,
@@ -2316,8 +2500,19 @@ def fetch_stock_industry_map_sync(
         )
         response.raise_for_status()
         rows = (response.json().get("data") or {}).get("diff") or []
-        if isinstance(rows, dict):
-            rows = list(rows.values())
+        return list(rows.values()) if isinstance(rows, dict) else rows
+
+    for offset in range(0, len(ordered_codes), 60):
+        chunk = ordered_codes[offset : offset + 60]
+        try:
+            rows = fetch_chunk(chunk)
+        except requests.RequestException:
+            rows = []
+            for retry_offset in range(0, len(chunk), 15):
+                try:
+                    rows.extend(fetch_chunk(chunk[retry_offset : retry_offset + 15]))
+                except requests.RequestException:
+                    continue
         for row in rows:
             code = str(row.get("f12") or "")
             industry = str(row.get("f100") or "").strip()
@@ -4518,11 +4713,25 @@ def fetch_etf_flow_signal_sync(timeout: float) -> dict[str, Any]:
 
 
 INDEX_FUTURES_DEFS = {
-    "IF": {"spotSymbol": "sh000300", "spotName": "沪深300"},
-    "IH": {"spotSymbol": "sh000016", "spotName": "上证50"},
-    "IC": {"spotSymbol": "sh000905", "spotName": "中证500"},
-    "IM": {"spotSymbol": "sh000852", "spotName": "中证1000"},
+    "IF": {"spotSymbol": "sh000300", "spotName": "沪深300", "multiplier": 300},
+    "IH": {"spotSymbol": "sh000016", "spotName": "上证50", "multiplier": 300},
+    "IC": {"spotSymbol": "sh000905", "spotName": "中证500", "multiplier": 200},
+    "IM": {"spotSymbol": "sh000852", "spotName": "中证1000", "multiplier": 200},
 }
+
+
+def index_futures_expiry_date(instrument_id: str) -> date | None:
+    match = re.fullmatch(r"(?:IF|IH|IC|IM)(\d{2})(\d{2})", str(instrument_id or "").upper())
+    if not match:
+        return None
+    year = 2000 + int(match.group(1))
+    month = int(match.group(2))
+    try:
+        first = date(year, month, 1)
+    except ValueError:
+        return None
+    first_friday_offset = (4 - first.weekday()) % 7
+    return first + timedelta(days=first_friday_offset + 14)
 
 
 def parse_cffex_daily_rows(payload: bytes) -> list[dict[str, Any]]:
@@ -4603,6 +4812,12 @@ def build_index_futures_signal(rows: list[dict[str, Any]], spots: dict[str, dict
         ):
             continue
         basis_pct = (future_price / spot_price - 1) * 100
+        instrument_id = str(row.get("instrumentId") or symbol)
+        expiry_date = index_futures_expiry_date(instrument_id)
+        trade_day = date.fromisoformat(trade_date)
+        days_to_expiry = (expiry_date - trade_day).days if expiry_date else 0
+        annualized_basis_pct = basis_pct * 365 / days_to_expiry if days_to_expiry > 0 else None
+        multiplier = int(definition["multiplier"])
         open_interest = safe_float(row.get("openInterest"))
         previous_open_interest = safe_float(row.get("previousOpenInterest"))
         open_interest_change = (
@@ -4615,18 +4830,29 @@ def build_index_futures_signal(rows: list[dict[str, Any]], spots: dict[str, dict
             if open_interest_change is not None and previous_open_interest and previous_open_interest > 0
             else None
         )
+        notional_exposure = open_interest * spot_price * multiplier if open_interest is not None else None
+        notional_change = open_interest_change * spot_price * multiplier if open_interest_change is not None else None
+        volume = safe_float(row.get("volume"))
+        volume_notional = volume * spot_price * multiplier if volume is not None else None
         contracts.append(
             {
                 "symbol": symbol,
-                "name": str(row.get("instrumentId") or symbol),
+                "name": instrument_id,
                 "spotName": definition["spotName"],
+                "multiplier": multiplier,
                 "future": future_price,
                 "spot": spot_price,
                 "basisPct": basis_pct,
+                "annualizedBasisPct": annualized_basis_pct,
+                "expiryDate": expiry_date.isoformat() if expiry_date else "",
+                "daysToExpiry": days_to_expiry if days_to_expiry > 0 else None,
                 "openInterest": open_interest,
                 "openInterestChange": open_interest_change,
                 "openInterestChangePct": open_interest_change_pct,
-                "volume": safe_float(row.get("volume")),
+                "notionalExposure": notional_exposure,
+                "notionalChange": notional_change,
+                "volume": volume,
+                "volumeNotional": volume_notional,
                 "tradeDate": trade_date,
             }
         )
@@ -4639,10 +4865,9 @@ def build_index_futures_signal(rows: list[dict[str, Any]], spots: dict[str, dict
             source_url=CFFEX_DAILY_STATISTICS_URL,
         )
 
-    basis_values = [item["basisPct"] for item in contracts]
-    open_interest = sum(value_or_zero(item.get("openInterest")) for item in contracts)
-    volume = sum(value_or_zero(item.get("volume")) for item in contracts)
-    open_interest_change = sum(value_or_zero(item.get("openInterestChange")) for item in contracts)
+    total_notional = sum(value_or_zero(item.get("notionalExposure")) for item in contracts)
+    total_notional_change = sum(value_or_zero(item.get("notionalChange")) for item in contracts)
+    total_volume_notional = sum(value_or_zero(item.get("volumeNotional")) for item in contracts)
     data_timestamp = max((str(item.get("tradeDate") or "") for item in contracts), default="")
 
     return {
@@ -4653,15 +4878,15 @@ def build_index_futures_signal(rows: list[dict[str, Any]], spots: dict[str, dict
         "status": "ok",
         "dataTimestamp": data_timestamp,
         "metrics": [
-            signal_metric("四合约平均基差", round(statistics.mean(basis_values), 3), "pct"),
-            signal_metric("主力持仓合计", round(open_interest), "contracts"),
-            signal_metric("主力持仓日变动", round(open_interest_change), "contracts"),
-            signal_metric("主力成交合计", round(volume), "contracts"),
+            signal_metric("名义持仓合计", round(total_notional, 2), "cny", "各品种主力合约按指数点位×合约乘数换算"),
+            signal_metric("名义持仓日变动", round(total_notional_change, 2), "cny", "持仓手数变化按各自乘数换算"),
+            signal_metric("成交名义金额合计", round(total_volume_notional, 2), "cny", "成交手数按各自乘数换算"),
+            signal_metric("覆盖品种", len(contracts), "number", "IF/IH/IC/IM 分品种展示，不聚合手数或平均基差"),
         ],
         "charts": [
             signal_chart(
                 "futures-basis",
-                "最高持仓合约相对现货基差",
+                "最高持仓合约年化基差",
                 "bar",
                 "%",
                 [
@@ -4672,8 +4897,8 @@ def build_index_futures_signal(rows: list[dict[str, Any]], spots: dict[str, dict
                         "points": [
                             {
                                 "label": item["symbol"],
-                                "value": round(item["basisPct"], 3),
-                                "color": "#22a06b" if item["basisPct"] >= 0 else "#7c3aed",
+                                "value": round(item["annualizedBasisPct"], 3) if item.get("annualizedBasisPct") is not None else None,
+                                "color": "#22a06b" if value_or_zero(item.get("annualizedBasisPct")) >= 0 else "#7c3aed",
                             }
                             for item in contracts
                         ],
@@ -4684,9 +4909,9 @@ def build_index_futures_signal(rows: list[dict[str, Any]], spots: dict[str, dict
         "details": [
             {
                 "label": f"{item['name']} · {item['spotName']}",
-                "value": round(item["basisPct"], 3),
+                "value": round(item["annualizedBasisPct"], 3) if item.get("annualizedBasisPct") is not None else None,
                 "format": "pct",
-                "note": f"持仓 {format(round(value_or_zero(item.get('openInterest'))), ',')} 手，较前日 {format(round(value_or_zero(item.get('openInterestChange'))), ',')} 手（{round(value_or_zero(item.get('openInterestChangePct')), 2)}%）",
+                "note": f"原始基差 {round(item['basisPct'], 3)}%；到期 {item.get('expiryDate') or '待核验'}；乘数 {item['multiplier']} 元/点；名义持仓 {format(round(value_or_zero(item.get('notionalExposure'))), ',')} 元",
             }
             for item in contracts
         ],
@@ -4694,7 +4919,8 @@ def build_index_futures_signal(rows: list[dict[str, Any]], spots: dict[str, dict
         "sourceUrl": CFFEX_DAILY_STATISTICS_URL,
         "sourceBadge": "中金所官方 · 同日基差",
         "cadence": "交易日收盘后",
-        "note": "每个品种选取中金所当日持仓量最高的具体交割合约；基差=中金所合约收盘价/同日现货指数收盘价-1。持仓日变动由中金所 openinterest-preopeninterest 直接计算；换月附近仍需结合期限结构判断。",
+        "contracts": contracts,
+        "note": "每个品种选取中金所当日持仓量最高的具体交割合约；名义敞口=手数×现货指数点位×合约乘数；基差按距第三个星期五的自然日年化，节假日顺延仍需核对交易所日历。四品种手数与原始基差不直接相加或平均。",
     }
 
 

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 import tempfile
@@ -5,7 +6,9 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
+from src import ai_service as ai_service_module
 from src.ai_service import (
     AI_PROJECTS_SCHEMA_VERSION,
     AI_SCHEMA_VERSION,
@@ -18,6 +21,7 @@ from src.ai_service import (
     curated_project_annotation,
     dedupe_ai_news,
     fallback_project_annotation,
+    get_ai_projects,
     has_chinese,
     is_low_quality_ai_title,
     load_snapshot_sync,
@@ -29,13 +33,69 @@ from src.ai_service import (
 
 
 class AiServiceTests(unittest.TestCase):
+    def test_v121_all_failed_searches_do_not_republish_previous_projects_as_fresh(self) -> None:
+        expired_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        stored = {
+            "schemaVersion": AI_PROJECTS_SCHEMA_VERSION,
+            "kind": "ai-projects",
+            "generatedAt": expired_at,
+            "savedAt": expired_at,
+            "expiresAt": expired_at,
+            "projects": [
+                {
+                    "id": 1,
+                    "fullName": "demo/ready-tool",
+                    "name": "ready-tool",
+                    "owner": "demo",
+                    "description": "Ready AI tool",
+                    "descriptionZh": "可直接使用的 AI 工具",
+                    "topics": [],
+                    "stars": 100,
+                    "forks": 10,
+                    "useStage": "ready",
+                    "capabilityTags": ["programming"],
+                    "deliverySurfaces": ["cli"],
+                    "defaultVisible": True,
+                    "discoveryScore": 80,
+                }
+            ]
+        }
+        with (
+            patch.object(
+                ai_service_module,
+                "GITHUB_SEARCH_SPECS",
+                [{"id": "popular", "query": "ai tool", "mode": "popular"}],
+            ),
+            patch.object(
+                ai_service_module,
+                "fetch_github_productivity_search",
+                new=AsyncMock(side_effect=RuntimeError("search offline")),
+            ),
+            patch.object(ai_service_module, "select_enrichment_candidates", return_value=[]),
+            patch.object(ai_service_module, "record_ai_project_history", new=AsyncMock()),
+            patch.object(ai_service_module, "load_ai_project_history", new=AsyncMock(return_value={})),
+            patch.object(ai_service_module, "read_memory_cache", new=AsyncMock(return_value=None)),
+            patch.object(ai_service_module, "load_snapshot", new=AsyncMock(return_value=stored)),
+            patch.object(ai_service_module, "save_snapshot", new=AsyncMock()) as save_snapshot,
+            patch.object(ai_service_module, "write_memory_cache", new=AsyncMock()),
+        ):
+            payload = asyncio.run(get_ai_projects(refresh=True, allow_stale=True, force=True))
+
+        self.assertTrue(payload["projects"])
+        self.assertTrue(payload["cached"])
+        self.assertTrue(payload["fromStorage"])
+        self.assertTrue(payload["stale"])
+        self.assertEqual(payload["generatedAt"], expired_at)
+        self.assertTrue(any("search offline" in error for error in payload["errors"]))
+        save_snapshot.assert_not_awaited()
+
     def test_github_project_type_classification(self) -> None:
         cases = [
-            ({"fullName": "demo/mcp-server", "description": "Model Context Protocol tools", "topics": []}, "MCP"),
-            ({"fullName": "demo/skills", "description": "Reusable AI skills", "topics": []}, "Skills"),
-            ({"fullName": "openai/codex", "description": "A coding agent for the terminal", "topics": []}, "智能体"),
-            ({"fullName": "demo/writer", "description": "A writing agent for long-form articles", "topics": []}, "智能体"),
-            ({"fullName": "demo/agent", "description": "Build AI agents", "topics": ["agents"]}, "Agent 框架"),
+            ({"fullName": "demo/mcp-server", "description": "Model Context Protocol server", "topics": []}, "安装即用"),
+            ({"fullName": "demo/skills", "description": "Reusable AI skills", "topics": []}, "安装即用"),
+            ({"fullName": "openai/codex", "description": "A coding agent for the terminal", "topics": []}, "直接可用"),
+            ({"fullName": "demo/writer", "description": "A writing agent for long-form articles", "topics": []}, "直接可用"),
+            ({"fullName": "demo/agent-sdk", "description": "SDK and framework for building AI agents", "topics": ["agent-framework", "sdk"]}, "开发组件"),
         ]
         for project, expected in cases:
             self.assertEqual(classify_github_project(project)[0], expected)
@@ -73,7 +133,7 @@ class AiServiceTests(unittest.TestCase):
     def test_github_searches_stay_within_the_anonymous_search_budget(self) -> None:
         self.assertLessEqual(len(GITHUB_PRODUCTIVITY_SEARCHES), 10)
 
-    def test_productivity_selection_balances_categories_and_builds_category_ranks(self) -> None:
+    def test_productivity_selection_uses_discovery_score_not_search_category_fallback(self) -> None:
         category_ids = ["coding-agents", "skills", "mcp", "agent-frameworks", "dev-workflows"]
         projects = []
         project_id = 1
@@ -82,7 +142,7 @@ class AiServiceTests(unittest.TestCase):
                 projects.append(
                     {
                         "id": project_id,
-                        "fullName": f"example/{category_id}-{item_index}",
+                        "fullName": f"example/tool-{project_id}",
                         "description": "Purpose-built AI developer tool",
                         "topics": [],
                         "matchedCategories": [category_id],
@@ -106,13 +166,10 @@ class AiServiceTests(unittest.TestCase):
 
         self.assertEqual(len(selected), MAX_GITHUB_PROJECTS)
         self.assertNotIn("tensorflow/tensorflow", {project["fullName"] for project in selected})
-        for category_id in category_ids:
-            category_projects = [project for project in selected if project["productivityCategory"] == category_id]
-            self.assertEqual(len(category_projects), MAX_GITHUB_PROJECTS_PER_CATEGORY)
-            self.assertEqual(
-                [project["categoryRank"] for project in category_projects],
-                list(range(1, MAX_GITHUB_PROJECTS_PER_CATEGORY + 1)),
-            )
+        self.assertEqual({project["productivityCategory"] for project in selected}, {"coding-agents"})
+        self.assertEqual([project["categoryRank"] for project in selected], list(range(1, MAX_GITHUB_PROJECTS + 1)))
+        self.assertTrue(all(project["useStage"] == "build" for project in selected))
+        self.assertTrue(all("discoveryScore" in project for project in selected))
 
     def test_curated_github_annotation_explains_project_use(self) -> None:
         annotation = curated_project_annotation({"fullName": "AUTOMATIC1111/stable-diffusion-webui"})

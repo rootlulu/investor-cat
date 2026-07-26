@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
@@ -54,6 +55,78 @@ def test_parse_topselling_payload_extracts_ordered_appids():
     assert parse_topselling_payload(payload) == ["730", "570"]
 
 
+def test_v50_live_topsellers_preserve_non_app_positions():
+    payload = {
+        "response": {
+            "ids": [
+                {"appid": 730},
+                {"packageid": 886313},
+                {"appid": 3240220},
+                {"appid": 1974050},
+            ]
+        }
+    }
+
+    assert svc.parse_live_topselling_payload(payload) == {
+        "730": 1,
+        "3240220": 3,
+        "1974050": 4,
+    }
+
+
+def test_v51_weekly_topsellers_keep_upstream_rank_gaps():
+    payload = {
+        "response": {
+            "ranks": [
+                {"rank": 9, "appid": 578080},
+                {"rank": 16, "appid": 3240220},
+                {"rank": 72, "appid": 1974050},
+            ]
+        }
+    }
+
+    assert svc.parse_weekly_topselling_payload(payload) == {
+        "578080": 9,
+        "3240220": 16,
+        "1974050": 72,
+    }
+
+
+def test_v52_monthly_top_releases_keep_official_tiers():
+    payload = {
+        "response": {
+            "top_dlc_releases": [{"appid": 999, "app_release_rank": 1}],
+            "top_combined_app_and_dlc_releases": [
+                {"appid": 730, "app_release_rank": 1},
+                {"appid": 570, "app_release_rank": 2},
+                {"appid": 1974050, "app_release_rank": 3},
+                {"appid": 440, "app_release_rank": 9},
+            ],
+        }
+    }
+
+    assert svc.parse_monthly_top_releases_payload(payload) == {
+        "730": 1,
+        "570": 2,
+        "1974050": 3,
+    }
+
+
+def test_v51_v52_periods_respect_steam_publish_cutoffs():
+    assert svc.latest_completed_steam_week(
+        datetime(2026, 7, 21, 7, 30, tzinfo=UTC)
+    ).isoformat() == "2026-07-07"
+    assert svc.latest_completed_steam_week(
+        datetime(2026, 7, 21, 8, 30, tzinfo=UTC)
+    ).isoformat() == "2026-07-14"
+    assert svc.latest_published_steam_month(
+        datetime(2026, 7, 15, 3, 0, tzinfo=UTC)
+    ).isoformat() == "2026-05-01"
+    assert svc.latest_published_steam_month(
+        datetime(2026, 7, 15, 17, 0, tzinfo=UTC)
+    ).isoformat() == "2026-06-01"
+
+
 def test_parse_steamcharts_html_keeps_monthly_rows():
     html = """
     <table>
@@ -68,6 +141,22 @@ def test_parse_steamcharts_html_keeps_monthly_rows():
     july = next(row for row in series if row["month"] == "2026-07")
     assert july["avg"] == 110500
     assert july["peak"] == 190000
+
+
+def test_v41_steamcharts_decimal_average_is_rounded_and_months_are_ascending():
+    html = """
+    <table>
+      <tr><td>July 2026</td><td>916,654.5</td><td>+1,000</td><td>+1%</td><td>1,573,727</td></tr>
+      <tr><td>June 2026</td><td>900,000.4</td><td>-5,000</td><td>-1%</td><td>1,500,000</td></tr>
+    </table>
+    """
+
+    series = parse_steamcharts_html(html)
+
+    assert series == [
+        {"month": "2026-06", "avg": 900000, "peak": 1500000},
+        {"month": "2026-07", "avg": 916655, "peak": 1573727},
+    ]
 
 
 def test_load_region_games_and_regions_from_config():
@@ -121,7 +210,15 @@ def test_get_region_games_builds_payload_with_mocks():
     def fake_save(db_path, region, payload):
         store[region] = payload
 
-    with patch.object(svc, "fetch_steam_topselling", return_value=(["730", "570"], None)), patch.object(
+    with patch.object(svc, "fetch_steam_live_topselling", return_value=({"730": 1, "570": 2}, None)) as live_fetch, patch.object(
+        svc,
+        "fetch_steam_weekly_topselling",
+        return_value=({"570": 7, "730": 9}, None, "2026-07-14 至 2026-07-21"),
+    ) as weekly_fetch, patch.object(
+        svc,
+        "fetch_steam_monthly_top_releases",
+        return_value=({"730": 1}, None, "2026-06"),
+    ) as monthly_fetch, patch.object(
         svc, "fetch_steam_current_players", return_value=100
     ), patch.object(
         svc,
@@ -132,6 +229,10 @@ def test_get_region_games_builds_payload_with_mocks():
     ):
         payload = asyncio.run(svc.get_region_games(cc="us", refresh=True))
         cached = asyncio.run(svc.get_region_games(cc="us"))
+
+    live_fetch.assert_awaited_with("us", svc.STEAM_RANKING_TIMEOUT)
+    weekly_fetch.assert_awaited_with("us", svc.STEAM_RANKING_TIMEOUT)
+    monthly_fetch.assert_awaited_with(svc.STEAM_RANKING_TIMEOUT)
 
     assert payload["region"] == "us"
     assert payload["regionName"] == "美国"
@@ -144,7 +245,12 @@ def test_get_region_games_builds_payload_with_mocks():
     assert ranked[0]["currentPlayers"] == 100
     assert ranked[0]["monthly"][0]["avg"] == 50
     assert ranked[0]["status"]["topselling"] == "ok"
+    assert ranked[0]["liveRank"] == 1
+    assert ranked[0]["weeklyRank"] == 9
+    assert ranked[0]["monthlyTier"] == 1
     assert ranked[0]["status"]["players"] == "ok"
+    assert payload["rankings"]["live"]["valueKind"] == "rank"
+    assert payload["rankings"]["monthly"]["valueKind"] == "tier"
 
     assert cached["cached"] is True
     assert cached["stale"] is False
@@ -163,37 +269,71 @@ def test_fetch_steamcharts_history_none_skips_browser():
     assert err is None
 
 
-def test_fetch_steam_topselling_uses_weekly_response(monkeypatch):
+def test_fetch_steam_live_topselling_uses_live_query_response(monkeypatch):
     monkeypatch.setattr(
         svc.bs,
         "fetch_page_json_response_via_browser",
-        lambda url, response_url_contains, timeout_ms: {
-            "response": {"ranks": [{"rank": 1, "appid": 730}, {"rank": 2, "appid": 570}]}
+        lambda url, response_url_contains, timeout_ms, **kwargs: {
+            "response": {"ids": [{"appid": 730}, {"appid": 570}]}
         },
     )
-    ids, err = asyncio.run(svc.fetch_steam_topselling("us", 10))
-    assert ids == ["730", "570"]
+    ranks, err = asyncio.run(svc.fetch_steam_live_topselling("global", 10))
+    assert ranks == {"730": 1, "570": 2}
     assert err is None
 
 
-def test_fetch_steam_topselling_falls_back_to_server_rendered_html(monkeypatch):
-    def unavailable(*args, **kwargs):
-        raise RuntimeError("weekly response unavailable")
-
-    monkeypatch.setattr(svc.bs, "fetch_page_json_response_via_browser", unavailable)
+def test_fetch_steam_weekly_topselling_uses_upstream_ranks(monkeypatch):
     monkeypatch.setattr(
         svc.bs,
-        "fetch_html_via_browser",
-        lambda url, timeout_ms: '<div data-appid="730"></div><div data-appid="570"></div>',
+        "fetch_page_json_response_via_browser",
+        lambda url, response_url_contains, timeout_ms, **kwargs: {
+            "response": {"ranks": [{"rank": 9, "appid": 730}, {"rank": 16, "appid": 570}]}
+        },
     )
-    ids, err = asyncio.run(svc.fetch_steam_topselling("us", 10))
-    assert ids == ["730", "570"]
+    ranks, err, period = asyncio.run(svc.fetch_steam_weekly_topselling("global", 10))
+    assert ranks == {"730": 9, "570": 16}
     assert err is None
+    assert "至" in period
+
+
+def test_browser_failures_are_summarized_before_reaching_region_payload(monkeypatch):
+    raw_error = (
+        "BrowserType.launch_persistent_context: Failed to create a ProcessSingleton "
+        "for profile.\nCall log:\n" + "x" * 500
+    )
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError(raw_error)
+
+    monkeypatch.setattr(svc.bs, "fetch_page_json_response_via_browser", unavailable)
+    monkeypatch.setattr(svc.bs, "fetch_html_via_browser", unavailable)
+
+    live_ranks, live_error = asyncio.run(svc.fetch_steam_live_topselling("global", 10))
+    weekly_ranks, weekly_error, _ = asyncio.run(svc.fetch_steam_weekly_topselling("global", 10))
+    monthly_tiers, monthly_error, _ = asyncio.run(svc.fetch_steam_monthly_top_releases(10))
+    rows, history_error = asyncio.run(svc.fetch_steamcharts_history(730, 10))
+
+    assert live_ranks == {}
+    assert weekly_ranks == {}
+    assert monthly_tiers == {}
+    assert rows == []
+    assert "profile" in live_error
+    assert "profile" in weekly_error
+    assert "profile" in monthly_error
+    assert "profile" in history_error
+    assert "Call log" not in live_error
+    assert "Call log" not in history_error
 
 
 def test_failed_refresh_keeps_last_valid_region_snapshot():
+    active_catalog = {
+        "revision": "same-watchlist",
+        "games": [],
+        "regions": [{"code": "global", "name": "全球"}, {"code": "us", "name": "美国"}],
+    }
     cached = {
         "schemaVersion": svc.GAME_REGION_SCHEMA_VERSION,
+        "watchlistRevision": "same-watchlist",
         "region": "us",
         "regionName": "美国",
         "generatedAt": "2026-07-25T00:00:00+00:00",
@@ -211,6 +351,7 @@ def test_failed_refresh_keeps_last_valid_region_snapshot():
     }
     failed = {
         "schemaVersion": svc.GAME_REGION_SCHEMA_VERSION,
+        "watchlistRevision": "same-watchlist",
         "region": "us",
         "regionName": "美国",
         "generatedAt": "2026-07-26T00:00:00+00:00",
@@ -227,7 +368,9 @@ def test_failed_refresh_keeps_last_valid_region_snapshot():
         "errors": ["Steam unavailable"],
     }
 
-    with patch.object(svc, "load_region_cache", return_value=cached), patch.object(
+    with patch.object(svc, "load_watchlist", return_value=active_catalog), patch.object(
+        svc, "load_region_cache", return_value=cached
+    ), patch.object(
         svc, "build_region_payload", return_value=failed
     ), patch.object(svc, "save_region_cache") as save:
         result = asyncio.run(svc.get_region_games(cc="us", refresh=True))
@@ -237,6 +380,37 @@ def test_failed_refresh_keeps_last_valid_region_snapshot():
     assert result["games"][0]["currentPlayers"] == 100
     assert "Steam unavailable" in result["errors"]
     save.assert_not_called()
+
+
+def test_v53_old_single_ranking_cache_is_not_reused():
+    old_cache = {
+        "schemaVersion": 1,
+        "region": "global",
+        "regionName": "全球",
+        "generatedAt": "2026-07-26T00:00:00+00:00",
+        "expiresAt": "2099-07-26T00:30:00+00:00",
+        "games": [{"appId": 1974050, "rank": 16}],
+        "errors": [],
+    }
+    rebuilt = {
+        "schemaVersion": svc.GAME_REGION_SCHEMA_VERSION,
+        "region": "global",
+        "regionName": "全球",
+        "generatedAt": "2026-07-26T01:00:00+00:00",
+        "expiresAt": "2026-07-26T01:30:00+00:00",
+        "rankings": {"live": {"status": "ok"}},
+        "games": [{"appId": 1974050, "rank": 72, "liveRank": 72}],
+        "errors": [],
+    }
+
+    with patch.object(svc, "load_region_cache", return_value=old_cache), patch.object(
+        svc, "build_region_payload", return_value=rebuilt
+    ) as build, patch.object(svc, "save_region_cache"):
+        result = asyncio.run(svc.get_region_games(cc="global"))
+
+    build.assert_awaited_once()
+    assert result["schemaVersion"] == 2
+    assert result["games"][0]["liveRank"] == 72
 
 
 def test_fetch_steam_current_players_delegates_to_browser(monkeypatch):
@@ -274,6 +448,9 @@ def test_watchlist_has_real_steam_appids_for_cn_games():
 
     assert by_zh["燕云十六声"]["appId"] == 3564740
     assert "steam" in by_zh["燕云十六声"]["platforms"]
+
+    # 全球实时榜中的 GTA V 条目是 Enhanced（appid 3240220），不是旧版 271590。
+    assert by_zh["侠盗猎车手 5 增强版"]["appId"] == 3240220
 
     # 原神 / 王者荣耀 确认无 Steam 版本：保持 null「未披露」
     assert by_zh["原神"]["appId"] in (None, "", 0)

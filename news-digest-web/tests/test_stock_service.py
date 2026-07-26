@@ -19,12 +19,14 @@ from src.stock_service import (
     build_institution_industry_payload,
     build_industrial_capital_signal,
     build_market_breadth_signal,
+    classify_stock_diagnostics,
     calculate_option_skew,
     discover_industry_financing_group_definitions,
     eastmoney_headers,
     estimate_etf_flow_from_aum,
     etf_implied_share_change_is_plausible,
     fetch_eastmoney_a_share_rows_sync,
+    fetch_stock_industry_map_sync,
     industry_financing_query_start,
     industry_financing_window_start,
     institution_category,
@@ -36,6 +38,7 @@ from src.stock_service import (
     private_fund_category,
     load_industry_financing_group_cache_sync,
     save_industry_financing_group_cache_sync,
+    upgrade_stock_snapshot,
     warm_browser_session,
 )
 
@@ -60,6 +63,38 @@ def financing_row(
 
 def series_by_code(payload: dict, code: str) -> dict:
     return next(item for item in payload["series"] if item["code"] == code)
+
+
+class StockSnapshotMigrationTests(unittest.TestCase):
+    def test_successful_fallback_warning_is_not_promoted_to_source_error(self) -> None:
+        diagnostics = classify_stock_diagnostics(
+            ["世界股票数据：timeout"],
+            ["东方财富行业接口本轮断连，已启用同花顺行业资金流向备用。"],
+        )
+
+        self.assertEqual(diagnostics["errors"], ["世界股票数据：timeout"])
+        self.assertEqual(
+            diagnostics["warnings"],
+            ["东方财富行业接口本轮断连，已启用同花顺行业资金流向备用。"],
+        )
+
+    def test_additive_schema_upgrade_keeps_legacy_market_snapshot_readable(self) -> None:
+        legacy = {
+            "schemaVersion": 15,
+            "markets": [
+                {
+                    "id": "a_share",
+                    "indices": [{"symbol": "000001", "name": "上证指数", "changePct": 1.2}],
+                }
+            ],
+        }
+
+        upgraded = upgrade_stock_snapshot(legacy)
+
+        self.assertEqual(upgraded["schemaVersion"], 16)
+        self.assertEqual(upgraded["legacySchemaVersion"], 15)
+        self.assertIn("qualitySummary", upgraded)
+        self.assertNotIn("qualitySummary", legacy)
 
 
 class IndustryFinancingTrendTests(unittest.TestCase):
@@ -190,12 +225,12 @@ class IndustryFinancingTrendTests(unittest.TestCase):
 
 
 class BrowserSessionTests(unittest.TestCase):
-    def test_browser_session_keeps_one_fingerprint_and_retries_boundedly(self) -> None:
+    def test_browser_session_keeps_one_fingerprint_and_uses_domain_coordinator(self) -> None:
         with new_browser_session() as session:
             self.assertEqual(session.headers["User-Agent"], BROWSER_USER_AGENT)
             retry = session.get_adapter("https://").max_retries
-            self.assertEqual(retry.total, 2)
-            self.assertIn("POST", retry.allowed_methods)
+            self.assertEqual(retry.total, 0)
+            self.assertTrue(session._domain_coordinator_wrapped)
 
     def test_eastmoney_xhr_origin_matches_the_landing_page(self) -> None:
         headers = eastmoney_headers("https://quote.eastmoney.com/center/gridlist.html#fund_etf")
@@ -263,6 +298,49 @@ class InstitutionIndustryAllocationTests(unittest.TestCase):
 
         self.assertEqual([item["code"] for item in holdings], ["600519", "300750"])
         self.assertEqual(holdings[0]["marketValue"], 7_305_798_900)
+
+    def test_etf_industry_map_retries_a_disconnected_large_batch_as_smaller_chunks(self) -> None:
+        class Response:
+            def __init__(self, codes: list[str]) -> None:
+                self._codes = codes
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "data": {
+                        "diff": [
+                            {"f12": code, "f14": f"样本{code}", "f100": "电子"}
+                            for code in self._codes
+                        ]
+                    }
+                }
+
+        class Session:
+            def __init__(self) -> None:
+                self.batch_sizes: list[int] = []
+                self.urls: list[str] = []
+
+            def get(self, url, *, params, **_kwargs):
+                codes = [secid.split(".", 1)[1] for secid in params["secids"].split(",")]
+                self.urls.append(url)
+                self.batch_sizes.append(len(codes))
+                if len(codes) > 20:
+                    import requests
+
+                    raise requests.ConnectionError("remote disconnected")
+                return Response(codes)
+
+        codes = {f"{index:06d}" for index in range(45)}
+        session = Session()
+
+        industry_map = fetch_stock_industry_map_sync(session, codes, 8)
+
+        self.assertEqual(set(industry_map), codes)
+        self.assertTrue(all("push2delay.eastmoney.com" in url for url in session.urls))
+        self.assertEqual(session.batch_sizes[0], 45)
+        self.assertTrue(all(size <= 20 for size in session.batch_sizes[1:]))
 
     def test_private_sample_keeps_published_total_and_groups_undisclosed_sectors(self) -> None:
         category = private_fund_category()
@@ -475,8 +553,11 @@ class MarginalSignalTests(unittest.TestCase):
         signal = build_index_futures_signal(rows, spots)
 
         self.assertEqual(signal["status"], "ok")
-        self.assertAlmostEqual(signal["charts"][0]["series"][0]["points"][0]["value"], -1)
-        self.assertEqual(signal["metrics"][2]["value"], 5)
+        self.assertAlmostEqual(signal["contracts"][0]["basisPct"], -1)
+        self.assertAlmostEqual(signal["charts"][0]["series"][0]["points"][0]["value"], -6.518)
+        metrics = {metric["label"]: metric["value"] for metric in signal["metrics"]}
+        self.assertEqual(metrics["名义持仓合计"], 600_000)
+        self.assertEqual(metrics["名义持仓日变动"], 150_000)
 
     def test_cffex_parser_uses_official_open_interest_difference(self) -> None:
         rows = parse_cffex_daily_rows(

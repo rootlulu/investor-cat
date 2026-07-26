@@ -7,10 +7,13 @@ export default defineConfig({
   root: "frontend",
   plugins: [react()],
   server: {
-    host: "0.0.0.0",
+    host: process.env.NEWS_DIGEST_HOST || "127.0.0.1",
     port: 5174,
     proxy: {
-      "/api": apiTarget
+      "/api": {
+        target: apiTarget,
+        xfwd: true
+      }
     }
   },
   build: {

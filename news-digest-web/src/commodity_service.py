@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 import sqlite3
@@ -12,12 +13,16 @@ from urllib.parse import urljoin
 
 import httpx
 
+from .investment_catalog import build_commodity_metadata
+from .investment_quality import build_metric_quality, quality_summary
+from .request_coordinator import coordinate_httpx_client
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT_DIR / "config" / "sources.json"
 COMMODITY_CACHE_LOCK = asyncio.Lock()
 DB_LOCK = asyncio.Lock()
 COMMODITY_CACHE: dict[str, Any] = {"expires_at": datetime.min.replace(tzinfo=UTC), "data": None}
-COMMODITY_SCHEMA_VERSION = 10
+COMMODITY_SCHEMA_VERSION = 12
 
 SINA_FUTURES_URL = "https://hq.sinajs.cn/list={symbols}"
 SINA_FUTURES_KLINE_URL = "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_k=/InnerFuturesNewService.getDailyKLine"
@@ -95,6 +100,36 @@ HISTORY_POINTS = 30
 SUNSIRS_BASIS_HISTORY_PAGES = 8
 SUNSIRS_BASIS_HISTORY_POINTS = 12
 SUNSIRS_BASIS_DETAIL_LIMIT = 120
+INVENTORY_TYPES = frozenset(
+    {
+        "exchange_receipt",
+        "deliverable_stock",
+        "port_stock",
+        "social_stock",
+        "mill_stock",
+        "plant_stock",
+        "sample_stock",
+    }
+)
+INVENTORY_TYPE_LABELS = {
+    "exchange_receipt": "交易所仓单",
+    "deliverable_stock": "可交割库存",
+    "port_stock": "港口库存",
+    "social_stock": "社会库存",
+    "mill_stock": "钢厂库存",
+    "plant_stock": "生产企业库存",
+    "sample_stock": "样本库存",
+}
+PREFERRED_INVENTORY_TYPES = {
+    "iron_ore": "port_stock",
+    "coking_coal": "plant_stock",
+    "coke": "port_stock",
+    "rebar": "social_stock",
+    "hot_rolled_coil": "social_stock",
+}
+COMMODITY_RELATIONS = frozenset(
+    {"same_product_global", "upstream_driver", "substitute", "downstream_demand"}
+)
 
 COMMODITIES = [
     {"id": "gold", "name": "黄金", "sector": "贵金属", "domesticFuture": "nf_AU0", "globalFuture": "hf_GC", "spotNames": ["黄金"], "unit": "元/克"},
@@ -156,7 +191,7 @@ COMMODITIES = [
         "unit": "元/吨",
     },
     {"id": "crude_oil", "name": "原油", "sector": "大宗能源", "domesticFuture": "nf_SC0", "globalFuture": "hf_OIL", "spotNames": ["原油"], "unit": "元/桶"},
-    {"id": "fuel_oil", "name": "燃料油", "sector": "大宗能源", "domesticFuture": "nf_FU0", "globalFuture": "hf_HO", "spotNames": ["燃料油"], "unit": "元/吨"},
+    {"id": "fuel_oil", "name": "燃料油", "sector": "大宗能源", "domesticFuture": "nf_FU0", "globalFuture": "hf_HO", "globalRelation": "substitute", "spotNames": ["燃料油"], "unit": "元/吨"},
     {
         "id": "asphalt",
         "name": "沥青",
@@ -177,7 +212,7 @@ COMMODITIES = [
         "spotNames": ["液化石油气", "液化气"],
         "unit": "元/吨",
     },
-    {"id": "natural_gas", "name": "天然气", "sector": "大宗能源", "domesticFuture": "", "globalFuture": "hf_NG", "spotNames": ["天然气"], "unit": ""},
+    {"id": "natural_gas", "name": "天然气", "sector": "大宗能源", "domesticFuture": "", "globalFuture": "hf_NG", "globalRelation": "upstream_driver", "spotNames": ["天然气"], "unit": ""},
     {
         "id": "methanol",
         "name": "甲醇",
@@ -233,7 +268,7 @@ COMMODITIES = [
     {"id": "soda_ash", "name": "纯碱", "sector": "建材", "domesticFuture": "nf_SA0", "globalFuture": "", "spotNames": ["纯碱"], "unit": "元/吨"},
     {"id": "urea", "name": "尿素", "sector": "化肥", "domesticFuture": "nf_UR0", "globalFuture": "", "spotNames": ["尿素"], "unit": "元/吨"},
     {"id": "industrial_silicon", "name": "工业硅", "sector": "新能源材料", "domesticFuture": "nf_SI0", "globalFuture": "", "spotNames": ["工业硅"], "unit": "元/吨"},
-    {"id": "polysilicon", "name": "多晶硅", "sector": "新能源材料", "domesticFuture": "nf_PS0", "globalFuture": "", "spotNames": ["多晶硅价格指数", "N型多晶硅料价格", "多晶硅"], "unit": "元/千克"},
+    {"id": "polysilicon", "name": "多晶硅", "sector": "新能源材料", "domesticFuture": "nf_PS0", "domesticFutureUnit": "元/吨", "globalFuture": "", "spotNames": ["多晶硅价格指数", "N型多晶硅料价格", "多晶硅"], "unit": "元/千克"},
     {"id": "lithium_carbonate", "name": "碳酸锂", "sector": "新能源材料", "domesticFuture": "nf_LC0", "globalFuture": "", "spotNames": ["电池级碳酸锂"], "unit": "元/吨"},
     {"id": "egg", "name": "鸡蛋", "sector": "农产品", "domesticFuture": "nf_JD0", "globalFuture": "", "spotNames": ["鸡蛋"], "unit": "元/500千克"},
     {"id": "corn", "name": "玉米", "sector": "农产品", "domesticFuture": "nf_C0", "globalFuture": "hf_C", "spotNames": ["玉米"], "unit": "元/吨"},
@@ -246,6 +281,44 @@ COMMODITIES = [
     {"id": "cotton", "name": "棉花", "sector": "农产品", "domesticFuture": "nf_CF0", "globalFuture": "hf_CT", "spotNames": ["棉花"], "unit": "元/吨"},
     {"id": "sugar", "name": "白糖", "sector": "农产品", "domesticFuture": "nf_SR0", "globalFuture": "", "spotNames": ["白糖"], "unit": "元/吨"},
 ]
+
+
+def classify_shfe_inventory_diagnostic(
+    error: str,
+    fallback_inventories: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Downgrade an SHFE fetch failure only when both precious-metal rows have a usable fallback."""
+
+    message = str(error or "").strip()
+    if not message:
+        return [], []
+
+    for commodity_id in ("gold", "silver"):
+        value = fallback_inventories.get(commodity_id)
+        rows = value if isinstance(value, list) else [value]
+        if not any(
+            isinstance(row, dict)
+            and row.get("inventory") is not None
+            and str(row.get("inventoryDate") or "").strip()
+            for row in rows
+        ):
+            return [message], []
+    return [], [f"{message}；黄金/白银仓单备用源已补位"]
+
+
+async def fetch_commodity_sources(client: httpx.AsyncClient) -> list[tuple[Any, str]]:
+    """Fetch independent providers concurrently; per-domain coordinator still bounds requests."""
+
+    return await asyncio.gather(
+        fetch_sina_futures(client),
+        fetch_sina_future_histories(client),
+        fetch_smm_spots(client),
+        fetch_sina_precious_spots(client),
+        fetch_sunsirs_basis_spots(client),
+        fetch_shfe_precious_inventories(client),
+        fetch_smm_inventories(client),
+        fetch_eastmoney_inventories(client),
+    )
 
 
 async def get_commodities(refresh: bool = False, allow_stale: bool = True, force: bool = False) -> dict[str, Any]:
@@ -268,7 +341,7 @@ async def get_commodities(refresh: bool = False, allow_stale: bool = True, force
             cached["throttled"] = False
             return cached
 
-    stored = await load_latest_commodities(db_path)
+    stored = upgrade_commodity_snapshot(await load_latest_commodities(db_path))
     stored_schema_valid = bool(stored and stored.get("schemaVersion") == COMMODITY_SCHEMA_VERSION)
     stored_is_fresh = bool(stored_schema_valid and effective_expires_at(stored, ttl_seconds) > datetime.now(UTC))
     if (
@@ -288,17 +361,21 @@ async def get_commodities(refresh: bool = False, allow_stale: bool = True, force
         return stored
 
     errors: list[str] = []
+    warnings: list[str] = []
     timeout = float(fetch_config.get("request_timeout_seconds", 8))
     async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(timeout)) as client:
-        futures, futures_error = await fetch_sina_futures(client)
-        future_histories, future_history_error = await fetch_sina_future_histories(client)
-        spots, spot_error = await fetch_smm_spots(client)
-        precious_spots, precious_spot_error = await fetch_sina_precious_spots(client)
-        sunsirs_spots, sunsirs_spot_error = await fetch_sunsirs_basis_spots(client)
-        shfe_inventories, inventory_error = await fetch_shfe_precious_inventories(client)
-        smm_inventories, smm_inventory_error = await fetch_smm_inventories(client)
-        eastmoney_inventories, eastmoney_inventory_error = await fetch_eastmoney_inventories(client)
-        inventories = {**smm_inventories, **shfe_inventories, **eastmoney_inventories}
+        coordinate_httpx_client(client)
+        (
+            (futures, futures_error),
+            (future_histories, future_history_error),
+            (spots, spot_error),
+            (precious_spots, precious_spot_error),
+            (sunsirs_spots, sunsirs_spot_error),
+            (shfe_inventories, inventory_error),
+            (smm_inventories, smm_inventory_error),
+            (eastmoney_inventories, eastmoney_inventory_error),
+        ) = await fetch_commodity_sources(client)
+        inventories = merge_inventory_series(smm_inventories, shfe_inventories, eastmoney_inventories)
         spots.update({name: spot for name, spot in precious_spots.items() if name not in spots})
         spots.update({name: spot for name, spot in sunsirs_spots.items() if name not in spots})
 
@@ -312,8 +389,12 @@ async def get_commodities(refresh: bool = False, allow_stale: bool = True, force
         errors.append(precious_spot_error)
     if sunsirs_spot_error:
         errors.append(sunsirs_spot_error)
-    if inventory_error:
-        errors.append(inventory_error)
+    inventory_errors, inventory_warnings = classify_shfe_inventory_diagnostic(
+        inventory_error,
+        eastmoney_inventories,
+    )
+    errors.extend(inventory_errors)
+    warnings.extend(inventory_warnings)
     if smm_inventory_error:
         errors.append(smm_inventory_error)
     if eastmoney_inventory_error:
@@ -323,6 +404,15 @@ async def get_commodities(refresh: bool = False, allow_stale: bool = True, force
         item
         for item in (build_commodity_item(item, futures, future_histories, spots, inventories) for item in COMMODITIES)
         if has_publishable_commodity_data(item)
+    ]
+    quality_rows = [
+        {"quality": quality}
+        for item in items
+        for quality in [
+            item.get("basisQuality"),
+            *(series.get("quality") for series in item.get("inventorySeries", [])),
+        ]
+        if isinstance(quality, dict)
     ]
     now = datetime.now(UTC)
     data = {
@@ -335,8 +425,10 @@ async def get_commodities(refresh: bool = False, allow_stale: bool = True, force
         "throttled": False,
         "hasData": any(has_publishable_commodity_data(row) for row in items),
         "source": "Sina Futures / Sina Spot / SMM / SHFE / Sunsirs / Eastmoney",
+        "qualitySummary": quality_summary(quality_rows),
         "cadence": "半小时最多真实抓取一次",
         "errors": errors,
+        "warnings": warnings,
         "items": items,
     }
 
@@ -351,6 +443,67 @@ async def get_commodities(refresh: bool = False, allow_stale: bool = True, force
         COMMODITY_CACHE["data"] = data
         COMMODITY_CACHE["expires_at"] = parse_dt(data["expiresAt"])
     return data
+
+
+async def read_commodity_snapshot() -> dict[str, Any] | None:
+    """Return the latest usable commodity snapshot without starting external I/O."""
+
+    config = load_config()
+    ttl_seconds = int(config.get("fetch", {}).get("min_refresh_interval_seconds", 1800))
+    cached = upgrade_commodity_snapshot(COMMODITY_CACHE.get("data"))
+    from_storage = False
+    if not isinstance(cached, dict) or not has_commodity_payload(cached):
+        cached = upgrade_commodity_snapshot(await load_latest_commodities(resolve_sqlite_path(config)))
+        from_storage = True
+    if not isinstance(cached, dict) or not has_commodity_payload(cached):
+        return None
+
+    snapshot = dict(cached)
+    schema_current = snapshot.get("schemaVersion") == COMMODITY_SCHEMA_VERSION
+    snapshot.update(
+        {
+            "cached": True,
+            "fromStorage": from_storage,
+            "throttled": False,
+            "stale": not schema_current or effective_expires_at(snapshot, ttl_seconds) <= datetime.now(UTC),
+        }
+    )
+    return snapshot
+
+
+def upgrade_commodity_snapshot(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    snapshot = copy.deepcopy(data)
+    previous_schema = snapshot.get("schemaVersion")
+    definitions = {definition["id"]: definition for definition in COMMODITIES}
+    quality_rows: list[dict[str, Any]] = []
+    for item in snapshot.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "")
+        definition = definitions.get(item_id) or {
+            "id": item_id,
+            "name": item.get("name") or item_id,
+            "sector": item.get("sector") or "其他",
+            "domesticFuture": "",
+            "globalFuture": "",
+        }
+        inventory_rows = [row for row in item.get("inventorySeries") or [] if isinstance(row, dict)]
+        item.update(build_commodity_metadata(definition, inventory_rows))
+        domestic_symbol = str(definition.get("domesticFuture") or "")
+        global_symbol = str(definition.get("globalFuture") or "")
+        item.setdefault("domesticFutureSourceUrl", SINA_FUTURES_URL.format(symbols=domestic_symbol) if domestic_symbol else "")
+        item.setdefault("globalFutureSourceUrl", SINA_FUTURES_URL.format(symbols=global_symbol) if global_symbol else "")
+        for quality in [item.get("basisQuality"), *(row.get("quality") for row in inventory_rows)]:
+            if isinstance(quality, dict):
+                quality_rows.append({"quality": quality})
+    if quality_rows:
+        snapshot["qualitySummary"] = quality_summary(quality_rows)
+    if previous_schema != COMMODITY_SCHEMA_VERSION:
+        snapshot["legacySchemaVersion"] = previous_schema
+    snapshot["schemaVersion"] = COMMODITY_SCHEMA_VERSION
+    return snapshot
 
 
 async def fetch_sina_futures(client: httpx.AsyncClient) -> tuple[dict[str, dict[str, Any]], str]:
@@ -466,8 +619,7 @@ async def fetch_sina_symbol_group(
             },
         )
         response.raise_for_status()
-        response.encoding = "gbk"
-        parsed = parse_sina_futures(response.text)
+        parsed = parse_sina_futures(decode_sina_response(response))
         missing = [symbol for symbol in symbols if symbol not in parsed]
         error = f"{label}部分代码无返回：{','.join(missing)}" if missing else ""
         return parsed, error
@@ -489,6 +641,10 @@ def parse_sina_futures(text: str) -> dict[str, dict[str, Any]]:
         if parsed:
             result[symbol] = parsed
     return result
+
+
+def decode_sina_response(response: httpx.Response) -> str:
+    return response.content.decode("gbk", errors="replace")
 
 
 def parse_sina_domestic_future(symbol: str, fields: list[str]) -> dict[str, Any] | None:
@@ -562,15 +718,15 @@ async def fetch_sina_precious_spots(client: httpx.AsyncClient) -> tuple[dict[str
             },
         )
         response.raise_for_status()
-        response.encoding = "gbk"
     except Exception as error:
         return {}, f"新浪贵金属现货暂未取到：{error}"
 
-    usd_cny = parse_sina_usd_cny(response.text)
+    decoded = decode_sina_response(response)
+    usd_cny = parse_sina_usd_cny(decoded)
     if not usd_cny:
         return {}, "新浪贵金属现货暂未取到：美元人民币汇率缺失"
 
-    quotes = parse_sina_futures(response.text)
+    quotes = parse_sina_futures(decoded)
     rows: dict[str, dict[str, Any]] = {}
     missing: list[str] = []
     for commodity_id, config in SINA_PRECIOUS_SPOT_SYMBOLS.items():
@@ -1313,12 +1469,173 @@ def clean_html(value: str) -> str:
     return unescape(re.sub(r"\s+", " ", cleaned)).strip()
 
 
+def infer_inventory_type(commodity_id: str, row: dict[str, Any]) -> str:
+    declared = str(row.get("inventoryType") or "").strip()
+    if declared in INVENTORY_TYPES:
+        return declared
+
+    source = str(row.get("inventorySource") or "")
+    if "港" in source:
+        return "port_stock"
+    if "社会" in source or "总库存" in source or commodity_id in {"rebar", "hot_rolled_coil"} and "SMM" in source:
+        return "social_stock"
+    if "钢厂" in source:
+        return "mill_stock"
+    if "焦企" in source or "生产" in source:
+        return "plant_stock"
+    if "仓单" in source or "期货库存" in source:
+        return "exchange_receipt"
+    return "sample_stock"
+
+
+def inventory_source_url(row: dict[str, Any]) -> str:
+    explicit = str(row.get("inventorySourceUrl") or "").strip()
+    if explicit:
+        return explicit
+    source = str(row.get("inventorySource") or "")
+    if "SMM" in source:
+        return SMM_PRICE_URL
+    if "SHFE" in source or "上期所" in source:
+        return "https://www.shfe.com.cn/"
+    if "东方财富" in source:
+        return EASTMONEY_DATA_URL
+    return SUNSIRS_FUTURES_URL
+
+
+def inventory_source_priority(row: dict[str, Any]) -> tuple[int, str]:
+    source = str(row.get("inventorySource") or "")
+    authority = 3 if "SHFE" in source or "上期所" in source else 2 if "SMM" in source else 1
+    return authority, str(row.get("inventoryDate") or "")
+
+
+def merge_inventory_series(*sources: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    merged: dict[str, list[dict[str, Any]]] = {}
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for source_rows in sources:
+        for commodity_id, raw_row in source_rows.items():
+            if not isinstance(raw_row, dict):
+                continue
+            row = dict(raw_row)
+            inventory_type = infer_inventory_type(commodity_id, row)
+            row["inventoryType"] = inventory_type
+            row["inventoryTypeLabel"] = INVENTORY_TYPE_LABELS[inventory_type]
+            signature = (
+                commodity_id,
+                inventory_type,
+                str(row.get("inventorySource") or ""),
+                str(row.get("inventoryDate") or ""),
+                str(row.get("inventory") or ""),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            inventory_date = str(row.get("inventoryDate") or "").strip()
+            row["quality"] = build_metric_quality(
+                value=row.get("inventory"),
+                unit=str(row.get("inventoryUnit") or "未披露"),
+                as_of=inventory_date or "未知",
+                source_url=inventory_source_url(row),
+                definition=f"{INVENTORY_TYPE_LABELS[inventory_type]}；不同库存类型不可互相覆盖或直接求和",
+                method="observed",
+                status="ok" if row.get("inventory") is not None and inventory_date else "partial",
+                coverage={"inventoryType": inventory_type},
+                quality_flags=[] if inventory_date else ["统计日未披露"],
+            )
+            merged.setdefault(commodity_id, []).append(row)
+
+    for rows in merged.values():
+        rows.sort(key=inventory_source_priority, reverse=True)
+    return merged
+
+
+def select_primary_inventory(commodity_id: str, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    preferred_type = PREFERRED_INVENTORY_TYPES.get(commodity_id, "exchange_receipt")
+    preferred = [row for row in rows if row.get("inventoryType") == preferred_type]
+    candidates = preferred or rows
+    return max(candidates, key=inventory_source_priority)
+
+
+PRICE_UNIT_FACTORS: dict[str, tuple[str, float]] = {
+    "元/吨": ("mass", 1.0),
+    "元/千克": ("mass", 1000.0),
+    "元/公斤": ("mass", 1000.0),
+    "元/500千克": ("mass", 2.0),
+    "元/克": ("mass", 1_000_000.0),
+    "元/桶": ("barrel", 1.0),
+    "元/平方米": ("area", 1.0),
+}
+
+
+def normalize_price_unit(value: Any, unit: str) -> tuple[float | None, str, str]:
+    number = safe_float(value)
+    normalized_unit = str(unit or "").strip()
+    if number is None or not normalized_unit:
+        return None, "", ""
+    dimension, factor = PRICE_UNIT_FACTORS.get(normalized_unit, (f"exact:{normalized_unit}", 1.0))
+    display_unit = "元/吨" if dimension == "mass" else normalized_unit
+    return number * factor, dimension, display_unit
+
+
+def is_explicit_future_contract(value: str) -> bool:
+    normalized = str(value or "").strip().upper()
+    return bool(re.search(r"\d{3,4}$", normalized))
+
+
+def assess_basis_comparability(
+    definition: dict[str, Any],
+    spot: dict[str, Any] | None,
+    domestic_future: dict[str, Any] | None,
+    spot_price: Any,
+    domestic_price: Any,
+) -> dict[str, Any]:
+    spot_unit = str((spot or {}).get("unit") or definition.get("unit") or "")
+    future_unit = str(definition.get("domesticFutureUnit") or definition.get("unit") or "")
+    normalized_spot, spot_dimension, normalized_unit = normalize_price_unit(spot_price, spot_unit)
+    normalized_future, future_dimension, future_normalized_unit = normalize_price_unit(domestic_price, future_unit)
+    rules = definition.get("basisRules") if isinstance(definition.get("basisRules"), dict) else {}
+    source_comparable = bool((spot or {}).get("basisComparable"))
+    reasons: list[str] = []
+
+    if normalized_spot is None or normalized_future is None:
+        reasons.append("现货或期货价格/单位缺失")
+    elif spot_dimension != future_dimension:
+        reasons.append("现货与期货计价维度不可换算")
+    if not (source_comparable or rules.get("gradeVerified")):
+        reasons.append("交割品级未核验")
+    if not (source_comparable or rules.get("locationVerified")):
+        reasons.append("交割地点未核验")
+    if not (source_comparable or rules.get("taxAdjusted")):
+        reasons.append("税费口径未核验")
+    if not (source_comparable or rules.get("freightAdjusted")):
+        reasons.append("运费/升贴水未核验")
+
+    contract = str((spot or {}).get("basisFutureContract") or (domestic_future or {}).get("instrumentId") or "")
+    if not is_explicit_future_contract(contract):
+        reasons.append("未对应具体交割合约")
+
+    comparable = not reasons
+    return {
+        "comparable": comparable,
+        "reasons": reasons,
+        "spotUnit": spot_unit,
+        "futureUnit": future_unit,
+        "normalizedUnit": normalized_unit if normalized_unit == future_normalized_unit else "",
+        "normalizedInputs": {
+            "spot": normalized_spot,
+            "future": normalized_future,
+        },
+        "contract": contract,
+    }
+
+
 def build_commodity_item(
     definition: dict[str, Any],
     futures: dict[str, dict[str, Any]],
     future_histories: dict[str, list[dict[str, Any]]],
     spots: dict[str, dict[str, Any]],
-    inventories: dict[str, dict[str, Any]],
+    inventories: dict[str, list[dict[str, Any]] | dict[str, Any]],
 ) -> dict[str, Any]:
     spot = first_matching_spot(definition["spotNames"], spots)
     domestic_future = futures.get(definition.get("domesticFuture", ""))
@@ -1327,7 +1644,13 @@ def build_commodity_item(
     global_future_history = future_histories.get(definition.get("globalFuture", ""), [])
     benchmark_future = futures.get(definition.get("benchmarkFuture", ""))
     benchmark_future_history = future_histories.get(definition.get("benchmarkFuture", ""), [])
-    inventory = inventories.get(definition["id"])
+    raw_inventory_rows = inventories.get(definition["id"], [])
+    if isinstance(raw_inventory_rows, dict):
+        inventory_rows = merge_inventory_series({definition["id"]: raw_inventory_rows}).get(definition["id"], [])
+    else:
+        inventory_rows = [dict(row) for row in raw_inventory_rows if isinstance(row, dict)]
+    inventory = select_primary_inventory(definition["id"], inventory_rows)
+    catalog_metadata = build_commodity_metadata(definition, inventory_rows)
     spot_price = spot.get("price") if spot else None
     domestic_price = domestic_future.get("price") if domestic_future else None
     if domestic_price is None and domestic_future_history:
@@ -1338,25 +1661,47 @@ def build_commodity_item(
     benchmark_price = benchmark_future.get("price") if benchmark_future else None
     if benchmark_price is None and benchmark_future_history:
         benchmark_price = benchmark_future_history[-1].get("close")
+    basis_comparison = assess_basis_comparability(
+        definition,
+        spot,
+        domestic_future,
+        spot_price,
+        domestic_price,
+    )
     basis = None
     basis_pct = None
     basis_future_contract = ""
     basis_future_price = None
     basis_source = ""
     spot_basis = safe_float(spot.get("basis")) if spot else None
-    if spot_basis is not None:
-        basis = round(spot_basis, 2)
-        basis_future_contract = str(spot.get("basisFutureContract") or "")
-        basis_future_price = safe_float(spot.get("basisFuturePrice"))
-        basis_source = str(spot.get("basisSource") or spot.get("source") or "")
-        basis_pct = round(basis / basis_future_price * 100, 2) if basis_future_price else None
-    elif spot_price is not None and domestic_price is not None:
-        basis = round(spot_price - domestic_price, 2)
-        basis_pct = round(basis / domestic_price * 100, 2) if domestic_price else None
-        basis_future_price = domestic_price
-        basis_source = "按现货-国内期货主连估算"
+    reported_basis = round(spot_basis, 2) if spot_basis is not None else None
+    reported_basis_source = str(spot.get("basisSource") or spot.get("source") or "") if spot else ""
+    basis_future_contract = str(spot.get("basisFutureContract") or "") if spot else ""
+    basis_future_price = safe_float(spot.get("basisFuturePrice")) if spot else None
+    if basis_comparison["comparable"]:
+        normalized_spot = safe_float(basis_comparison["normalizedInputs"].get("spot"))
+        normalized_future = safe_float(basis_comparison["normalizedInputs"].get("future"))
+        if normalized_spot is not None and normalized_future is not None:
+            basis = round(normalized_spot - normalized_future, 2)
+            basis_pct = round(basis / normalized_future * 100, 2) if normalized_future else None
+            basis_future_price = normalized_future
+            basis_source = reported_basis_source or "标准化现货-具体交割合约"
     if domestic_price is None and basis_future_price is not None:
         domestic_price = basis_future_price
+
+    basis_status = "ok" if basis_comparison["comparable"] else "invalid" if spot_price is not None and domestic_price is not None else "unavailable"
+    basis_as_of = str((spot or {}).get("date") or (domestic_future or {}).get("date") or "未知")
+    basis_quality = build_metric_quality(
+        value=basis,
+        unit=str(basis_comparison.get("normalizedUnit") or definition.get("unit") or "未披露"),
+        as_of=basis_as_of,
+        source_url=str((spot or {}).get("url") or SUNSIRS_FUTURES_URL),
+        definition="现货与对应具体交割合约在单位、币种、品级、地点、税费和运费统一后的价差",
+        method="derived",
+        status=basis_status,
+        formula="normalized spot - normalized future",
+        quality_flags=basis_comparison["reasons"],
+    )
 
     cross_market_spread = None
     cross_market_spread_pct = None
@@ -1365,16 +1710,17 @@ def build_commodity_item(
     if spot and spot.get("source") == "新浪现货":
         note_parts.append("现货采用伦敦金银并按美元人民币汇率折算")
     if benchmark_future and not global_future:
-        note_parts.append("国际列展示上游基准盘参考")
-    if basis_source == "生意社现货-期货合约":
-        note_parts.append("升贴水采用生意社现期表")
-    elif basis is not None:
-        note_parts.append("升贴水按现货均价减国内期货主连估算")
+        note_parts.append("外盘列仅展示上游驱动，不代表同品种国际价格")
+    if reported_basis is not None and not basis_comparison["comparable"]:
+        note_parts.append("来源报告基差因口径元数据不足，仅保留参考值，不参与信号")
+    if basis_comparison["reasons"]:
+        note_parts.append("基差不可比：" + "、".join(basis_comparison["reasons"]))
 
     return {
         "id": definition["id"],
         "name": definition["name"],
         "sector": definition["sector"],
+        **catalog_metadata,
         "unit": definition["unit"],
         "spotName": spot.get("name") if spot else "",
         "spotUnit": spot.get("unit") if spot else definition["unit"],
@@ -1383,6 +1729,7 @@ def build_commodity_item(
         "spotChange": spot.get("change") if spot else None,
         "spotDate": spot.get("date") if spot else "",
         "spotHistory": spot.get("history", []) if spot else [],
+        "spotSourceUrl": str(spot.get("url") or "") if spot else "",
         "domesticFutureSymbol": domestic_future.get("symbol") if domestic_future else basis_future_contract or definition.get("domesticFuture", "").replace("nf_", ""),
         "domesticFutureName": domestic_future.get("name") if domestic_future else (f"{basis_future_contract}合约" if basis_future_contract else ""),
         "domesticFuturePrice": domestic_price,
@@ -1391,6 +1738,7 @@ def build_commodity_item(
         "domesticFutureOpenInterest": domestic_future.get("openInterest") if domestic_future else None,
         "domesticFutureDate": domestic_future.get("date") if domestic_future else (spot.get("date") if basis_future_price is not None else (domestic_future_history[-1].get("date") if domestic_future_history else "")),
         "domesticFutureHistory": domestic_future_history,
+        "domesticFutureSourceUrl": str((domestic_future or {}).get("sourceUrl") or (domestic_future or {}).get("url") or SINA_FUTURES_URL.format(symbols=definition.get("domesticFuture", ""))),
         "globalFutureSymbol": global_future.get("symbol") if global_future else definition.get("globalFuture", "").replace("hf_", ""),
         "globalFutureName": global_future.get("name") if global_future else "",
         "globalFuturePrice": global_price,
@@ -1398,26 +1746,37 @@ def build_commodity_item(
         "globalFutureVolume": global_future.get("volume") if global_future else None,
         "globalFutureDate": global_future.get("date") if global_future else (global_future_history[-1].get("date") if global_future_history else ""),
         "globalFutureHistory": global_future_history,
+        "globalFutureSourceUrl": str((global_future or {}).get("sourceUrl") or (global_future or {}).get("url") or SINA_FUTURES_URL.format(symbols=definition.get("globalFuture", ""))),
+        "globalFutureRelation": str(definition.get("globalRelation") or ("same_product_global" if definition.get("globalFuture") else "")),
         "benchmarkFutureSymbol": benchmark_future.get("symbol") if benchmark_future else definition.get("benchmarkFuture", "").replace("hf_", ""),
         "benchmarkFutureName": benchmark_future.get("name") if benchmark_future else "",
         "benchmarkFuturePrice": benchmark_price,
         "benchmarkFutureChangePct": benchmark_future.get("changePct") if benchmark_future else None,
         "benchmarkFutureDate": benchmark_future.get("date") if benchmark_future else (benchmark_future_history[-1].get("date") if benchmark_future_history else ""),
         "benchmarkFutureHistory": benchmark_future_history,
+        "benchmarkFutureRelation": str(definition.get("benchmarkRelation") or ("upstream_driver" if definition.get("benchmarkFuture") else "")),
         "crossMarketSpread": cross_market_spread,
         "crossMarketSpreadPct": cross_market_spread_pct,
         "basis": basis,
         "basisPct": basis_pct,
         "basisSource": basis_source,
+        "basisComparison": basis_comparison,
+        "basisQuality": basis_quality,
+        "reportedBasis": reported_basis,
+        "reportedBasisSource": reported_basis_source,
         "basisFutureContract": basis_future_contract,
         "basisFuturePrice": basis_future_price,
         "inventory": inventory.get("inventory") if inventory else None,
         "inventoryUnit": inventory.get("inventoryUnit") if inventory else "",
         "inventoryDate": inventory.get("inventoryDate") if inventory else "",
         "inventorySource": inventory.get("inventorySource") if inventory else "",
+        "inventorySourceUrl": inventory_source_url(inventory) if inventory else "",
         "inventoryChange": inventory.get("inventoryChange") if inventory else None,
         "inventoryChangePct": inventory.get("inventoryChangePct") if inventory else None,
         "inventoryHistory": inventory.get("inventoryHistory", []) if inventory else [],
+        "inventoryType": inventory.get("inventoryType") if inventory else "",
+        "inventoryTypeLabel": inventory.get("inventoryTypeLabel") if inventory else "",
+        "inventorySeries": inventory_rows,
         "source": " / ".join(
             sorted(
                 {

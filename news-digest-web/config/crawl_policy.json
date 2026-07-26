@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "default": {
+    "maxConcurrency": 1,
+    "minIntervalSeconds": 0.75,
+    "jitterSeconds": 0.25,
+    "retries": 1,
+    "backoffBaseSeconds": 0.75,
+    "cooldownSeconds": 300
+  },
+  "domains": {
+    "xueqiu.com": {
+      "group": "xueqiu.com",
+      "minIntervalSeconds": 1.5,
+      "jitterSeconds": 0.5,
+      "cooldownSeconds": 900
+    },
+    "*.xueqiu.com": {
+      "group": "xueqiu.com",
+      "minIntervalSeconds": 1.5,
+      "jitterSeconds": 0.5,
+      "cooldownSeconds": 900
+    },
+    "news.google.com": {
+      "group": "news.google.com",
+      "minIntervalSeconds": 0.6,
+      "jitterSeconds": 0.3
+    },
+    "api.github.com": {
+      "group": "api.github.com",
+      "minIntervalSeconds": 1.0,
+      "jitterSeconds": 0.4,
+      "cooldownSeconds": 600
+    },
+    "eastmoney.com": {
+      "group": "eastmoney.com",
+      "minIntervalSeconds": 0.65,
+      "jitterSeconds": 0.35
+    },
+    "*.eastmoney.com": {
+      "group": "eastmoney.com",
+      "minIntervalSeconds": 0.65,
+      "jitterSeconds": 0.35
+    },
+    "stats.gov.cn": {
+      "group": "stats.gov.cn",
+      "minIntervalSeconds": 1.25,
+      "jitterSeconds": 0.5
+    },
+    "*.stats.gov.cn": {
+      "group": "stats.gov.cn",
+      "minIntervalSeconds": 1.25,
+      "jitterSeconds": 0.5
+    },
+    "100ppi.com": {
+      "group": "100ppi.com",
+      "minIntervalSeconds": 0.8,
+      "jitterSeconds": 0.4
+    },
+    "*.100ppi.com": {
+      "group": "100ppi.com",
+      "minIntervalSeconds": 0.8,
+      "jitterSeconds": 0.4
+    },
+    "smm.cn": {
+      "group": "smm.cn",
+      "minIntervalSeconds": 1.0,
+      "jitterSeconds": 0.4
+    },
+    "*.smm.cn": {
+      "group": "smm.cn",
+      "minIntervalSeconds": 1.0,
+      "jitterSeconds": 0.4
+    },
+    "shfe.com.cn": {
+      "group": "shfe.com.cn",
+      "minIntervalSeconds": 1.0,
+      "jitterSeconds": 0.4
+    },
+    "*.shfe.com.cn": {
+      "group": "shfe.com.cn",
+      "minIntervalSeconds": 1.0,
+      "jitterSeconds": 0.4
+    },
+    "store.steampowered.com": {
+      "group": "store.steampowered.com",
+      "minIntervalSeconds": 1.5,
+      "jitterSeconds": 0.5
+    },
+    "api.steampowered.com": {
+      "group": "api.steampowered.com",
+      "minIntervalSeconds": 0.5,
+      "jitterSeconds": 0.25
+    },
+    "steamcharts.com": {
+      "group": "steamcharts.com",
+      "minIntervalSeconds": 1.0,
+      "jitterSeconds": 0.4
+    }
+  }
+}

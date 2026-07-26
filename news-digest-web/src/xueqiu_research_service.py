@@ -51,6 +51,7 @@ LOGGER = logging.getLogger(__name__)
 RESEARCH_TASKS: dict[str, asyncio.Task[None]] = {}
 RESEARCH_TASK_LOCK = asyncio.Lock()
 RESEARCH_DB_LOCK = threading.Lock()
+RESEARCH_CRAWL_SEMAPHORE = threading.Semaphore(1)
 
 
 class XueqiuResearchError(RuntimeError):
@@ -621,6 +622,20 @@ def claim_research_job_sync(job_id: str, db_path: Path | str | None = None) -> d
 
 
 def run_research_crawl_sync(
+    job_id: str,
+    db_path: Path | str | None = None,
+    *,
+    pages_per_stream: int = XUEQIU_RESEARCH_PAGES_PER_STREAM,
+) -> None:
+    with RESEARCH_CRAWL_SEMAPHORE:
+        _run_research_crawl_unlocked_sync(
+            job_id,
+            db_path,
+            pages_per_stream=pages_per_stream,
+        )
+
+
+def _run_research_crawl_unlocked_sync(
     job_id: str,
     db_path: Path | str | None = None,
     *,

@@ -1,4 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -206,6 +209,36 @@ class XueqiuResearchStoreTests(unittest.TestCase):
         recovered = research.get_research_job_sync(job["id"], self.db_path)
         self.assertEqual(recovered["status"], "interrupted")
         self.assertEqual(recovered["stopReason"], "service_restart")
+
+    def test_research_crawls_are_globally_single_flight(self) -> None:
+        active = 0
+        max_active = 0
+        state_lock = threading.Lock()
+
+        def run_unlocked(*_args, **_kwargs) -> None:
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            with state_lock:
+                active -= 1
+
+        with patch.object(
+            research,
+            "_run_research_crawl_unlocked_sync",
+            side_effect=run_unlocked,
+        ) as run:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(research.run_research_crawl_sync, f"job-{index}")
+                    for index in range(2)
+                ]
+                for future in futures:
+                    future.result(timeout=1)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(max_active, 1)
 
 
 if __name__ == "__main__":

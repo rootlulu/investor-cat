@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-HOST="${HOST:-0.0.0.0}"
+HOST="${HOST:-127.0.0.1}"
 API_PORT="${API_PORT:-5173}"
 WEB_PORT="${WEB_PORT:-5174}"
 VENV_DIR="${VENV_DIR:-.venv}"
@@ -51,7 +51,7 @@ trap cleanup EXIT INT TERM
 
 echo
 echo "Starting backend: http://localhost:${API_PORT}"
-"$PYTHON" -m uvicorn src.app:app --host "$HOST" --port "$API_PORT" --reload &
+"$PYTHON" -m uvicorn src.app:app --host "$HOST" --port "$API_PORT" --reload --reload-dir src &
 API_PID="$!"
 
 sleep 1

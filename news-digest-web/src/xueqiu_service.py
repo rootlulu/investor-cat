@@ -18,6 +18,12 @@ from zoneinfo import ZoneInfo
 import requests
 
 from . import browser_service as bs
+from .request_coordinator import (
+    DomainCoolingDown,
+    REQUEST_COORDINATOR,
+    check_response_risk,
+    domain_slot,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 XUEQIU_CONFIG_PATH = ROOT_DIR / "config" / "xueqiu_influencers.json"
@@ -64,6 +70,7 @@ XUEQIU_BROWSER_COOKIE_SECONDS = 20 * 60
 XUEQIU_BROWSER_LOCK_POLL_SECONDS = 0.25
 XUEQIU_BROWSER_INTERACTIVE_WAIT_SECONDS = 180
 XUEQIU_BROWSER_VERIFY_POLL_SECONDS = 1.0
+XUEQIU_AUTH_REMOTE_PROBE_SECONDS = 15.0
 XUEQIU_DEFAULT_SETTINGS: dict[str, Any] = {
     "request": {
         "userAgent": XUEQIU_USER_AGENT,
@@ -93,8 +100,10 @@ XUEQIU_BROWSER_COOKIE_CACHE: dict[str, Any] = {"expires_at": 0.0, "cookie": ""}
 XUEQIU_BROWSER_FAILURE_CACHE: dict[str, Any] = {"expires_at": 0.0, "message": ""}
 XUEQIU_LOCK = asyncio.Lock()
 XUEQIU_SEARCH_LOCK = asyncio.Lock()
+XUEQIU_SEARCH_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
 XUEQIU_AUTH_LOCK = threading.Lock()
 XUEQIU_AUTH_SESSION: dict[str, Any] = {}
+XUEQIU_REFRESH_TASK: asyncio.Task[dict[str, Any]] | None = None
 
 
 class XueqiuApiError(RuntimeError):
@@ -114,6 +123,26 @@ async def get_xueqiu(refresh: bool = False, allow_stale: bool = True, force: boo
     if not refresh:
         return build_xueqiu_snapshot()
 
+    return await refresh_xueqiu_singleflight()
+
+
+async def refresh_xueqiu_singleflight() -> dict[str, Any]:
+    global XUEQIU_REFRESH_TASK
+    async with XUEQIU_LOCK:
+        task = XUEQIU_REFRESH_TASK
+        if task is None or task.done():
+            task = asyncio.create_task(fetch_and_cache_xueqiu())
+            XUEQIU_REFRESH_TASK = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done():
+            async with XUEQIU_LOCK:
+                if XUEQIU_REFRESH_TASK is task:
+                    XUEQIU_REFRESH_TASK = None
+
+
+async def fetch_and_cache_xueqiu() -> dict[str, Any]:
     data = await asyncio.to_thread(fetch_xueqiu_sync)
     async with XUEQIU_LOCK:
         XUEQIU_CACHE["data"] = data
@@ -150,26 +179,28 @@ async def import_xueqiu_influencer(query: str, name: str = "") -> dict[str, Any]
 
 
 async def search_xueqiu_users(query: str, limit: int = 6) -> dict[str, Any]:
+    return await asyncio.shield(search_xueqiu_users_serialized(query, limit))
+
+
+async def search_xueqiu_users_serialized(query: str, limit: int = 6) -> dict[str, Any]:
     nickname = normalize_nickname_query(query)
     if not nickname:
         return {"query": "", "suggestions": [], "message": ""}
 
     safe_limit = max(1, min(int(limit or 6), 10))
     cache_key = f"{nickname.casefold()}:{safe_limit}"
-    async with XUEQIU_SEARCH_LOCK:
+    async with xueqiu_search_lock():
         cached = XUEQIU_SEARCH_CACHE.get(cache_key)
         if cached and float(cached.get("expiresAt") or 0) > time.time():
             return dict(cached["data"])
 
-    suggestions, errors = await asyncio.to_thread(search_user_profiles_sync, nickname, safe_limit)
-    message = ""
-    if not suggestions and errors:
-        message = f"雪球搜索暂不可用：{normalize_error(errors[0])}"
-    elif not suggestions:
-        message = "没有找到匹配的雪球用户"
-    data = {"query": nickname, "suggestions": suggestions, "message": message}
-
-    async with XUEQIU_SEARCH_LOCK:
+        suggestions, errors = await asyncio.to_thread(search_user_profiles_sync, nickname, safe_limit)
+        message = ""
+        if not suggestions and errors:
+            message = f"雪球搜索暂不可用：{normalize_error(errors[0])}"
+        elif not suggestions:
+            message = "没有找到匹配的雪球用户"
+        data = {"query": nickname, "suggestions": suggestions, "message": message}
         XUEQIU_SEARCH_CACHE[cache_key] = {
             "expiresAt": time.time() + XUEQIU_SEARCH_CACHE_SECONDS,
             "data": data,
@@ -184,6 +215,15 @@ async def search_xueqiu_users(query: str, limit: int = 6) -> dict[str, Any]:
     return data
 
 
+def xueqiu_search_lock() -> asyncio.Lock:
+    global XUEQIU_SEARCH_LOCK, XUEQIU_SEARCH_LOCK_LOOP
+    loop = asyncio.get_running_loop()
+    if XUEQIU_SEARCH_LOCK_LOOP is not loop:
+        XUEQIU_SEARCH_LOCK = asyncio.Lock()
+        XUEQIU_SEARCH_LOCK_LOOP = loop
+    return XUEQIU_SEARCH_LOCK
+
+
 async def remove_xueqiu_influencer(influencer_id: str) -> dict[str, Any]:
     async with XUEQIU_LOCK:
         influencers = load_influencers_config()
@@ -193,11 +233,7 @@ async def remove_xueqiu_influencer(influencer_id: str) -> dict[str, Any]:
         save_influencers_config(next_influencers)
         invalidate_xueqiu_cache()
 
-    data = await asyncio.to_thread(fetch_xueqiu_sync)
-    async with XUEQIU_LOCK:
-        XUEQIU_CACHE["data"] = data
-        XUEQIU_CACHE["expires_at"] = time.time() + XUEQIU_CACHE_SECONDS
-    return data
+    return await refresh_xueqiu_singleflight()
 
 
 async def start_xueqiu_auth_qrcode(force: bool = False) -> dict[str, Any]:
@@ -257,6 +293,7 @@ def start_xueqiu_auth_qrcode_sync(force: bool = False) -> dict[str, Any]:
                 "qrDataUrl": qr_data_url,
                 "startedAt": datetime.now(UTC).isoformat(),
                 "expiresAt": expires_at,
+                "lastRemoteProbeAt": 0.0,
                 "message": "请用雪球 App 扫码登录。",
             })
             return current_xueqiu_auth_session_response_locked()
@@ -269,7 +306,13 @@ def start_xueqiu_auth_qrcode_sync(force: bool = False) -> dict[str, Any]:
 
 
 def open_xueqiu_qr_login_page(page: Any, timeout_ms: int) -> str:
-    page.goto(XUEQIU_HOME_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+    with domain_slot(XUEQIU_HOME_URL):
+        response = page.goto(XUEQIU_HOME_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+    check_response_risk(
+        XUEQIU_HOME_URL,
+        status_code=int(response.status) if response else 200,
+        headers=response.headers if response else None,
+    )
     page.wait_for_timeout(1500)
     controls = page.locator(".newLogin_modal__login__control_2mV").first.locator("a")
     if controls.count() >= 3:
@@ -285,7 +328,8 @@ def get_xueqiu_auth_status_sync() -> dict[str, Any]:
     with XUEQIU_AUTH_LOCK:
         if not XUEQIU_AUTH_SESSION:
             return {"status": "idle", "message": "尚未开始雪球扫码登录。"}
-        if time.time() >= float(XUEQIU_AUTH_SESSION.get("expiresAt") or 0):
+        now = time.time()
+        if now >= float(XUEQIU_AUTH_SESSION.get("expiresAt") or 0):
             close_xueqiu_auth_session_locked()
             return {"status": "expired", "message": "雪球登录二维码已过期，请重新刷新二维码。"}
 
@@ -293,6 +337,11 @@ def get_xueqiu_auth_status_sync() -> dict[str, Any]:
         if not context:
             close_xueqiu_auth_session_locked()
             return {"status": "error", "message": "雪球登录会话已失效，请重新刷新二维码。"}
+
+        last_probe_at = float(XUEQIU_AUTH_SESSION.get("lastRemoteProbeAt") or 0)
+        if now - last_probe_at < XUEQIU_AUTH_REMOTE_PROBE_SECONDS:
+            return current_xueqiu_auth_session_response_locked()
+        XUEQIU_AUTH_SESSION["lastRemoteProbeAt"] = now
 
         if xueqiu_auth_probe_succeeded(context):
             cache_xueqiu_browser_cookies(context.cookies([XUEQIU_HOME_URL]))
@@ -671,8 +720,13 @@ def search_user_profiles_sync(query: str, limit: int = 6) -> tuple[list[dict[str
 def fetch_user_profile_by_nickname_url_sync(session: requests.Session, nickname: str) -> dict[str, Any]:
     if not nickname:
         return {}
+    url = f"{XUEQIU_HOME_URL}n/{quote(nickname, safe='')}"
     try:
-        response = session.get(f"{XUEQIU_HOME_URL}n/{quote(nickname, safe='')}", allow_redirects=False, timeout=10)
+        response = REQUEST_COORDINATOR.run_sync(
+            url,
+            lambda: session.get(url, allow_redirects=False, timeout=10),
+            retry_exceptions=(requests.RequestException,),
+        )
     except Exception:
         return {}
 
@@ -782,7 +836,12 @@ def create_xueqiu_session() -> requests.Session:
         headers["Cookie"] = cookie
     session.headers.update(headers)
     try:
-        session.get(XUEQIU_TOKEN_WARMUP_URL, allow_redirects=False, timeout=8)
+        REQUEST_COORDINATOR.run_sync(
+            XUEQIU_TOKEN_WARMUP_URL,
+            lambda: session.get(XUEQIU_TOKEN_WARMUP_URL, allow_redirects=False, timeout=8),
+            retry_exceptions=(requests.RequestException,),
+            body_getter=lambda response: response.text,
+        )
     except Exception:
         pass
     warmup_cookie = requests_cookies_to_header(session.cookies)
@@ -793,11 +852,14 @@ def create_xueqiu_session() -> requests.Session:
 
 def fetch_xueqiu_json(session: requests.Session, url: str, params: dict[str, Any] | None = None, timeout: int = 12) -> dict[str, Any]:
     try:
-        response = session.get(url, params=params, timeout=timeout)
+        response = REQUEST_COORDINATOR.run_sync(
+            url,
+            lambda: session.get(url, params=params, timeout=timeout),
+            retry_exceptions=(requests.RequestException,),
+            body_getter=lambda result: result.text,
+        )
         return response_json_or_error(response, url)
     except XueqiuApiError as error:
-        if is_retryable_xueqiu_error(error) and not xueqiu_browser_headless():
-            raise XueqiuApiError(f"{normalize_error(error)}；需要扫码登录，请在页面弹出的雪球二维码登录。") from error
         if not should_retry_with_browser(error):
             browser_failure = get_recent_xueqiu_browser_failure()
             if browser_failure and is_retryable_xueqiu_error(error):
@@ -807,6 +869,8 @@ def fetch_xueqiu_json(session: requests.Session, url: str, params: dict[str, Any
             payload = fetch_xueqiu_json_with_browser_sync(url, params=params, timeout=timeout)
             apply_xueqiu_cookie_header(session)
             return payload
+        except DomainCoolingDown:
+            raise
         except Exception as browser_error:
             message = summarize_browser_error(browser_error)
             remember_xueqiu_browser_failure(message)
@@ -861,7 +925,7 @@ def fetch_xueqiu_json_with_browser_sync(url: str, params: dict[str, Any] | None 
             cleanup_stale_chromium_profile_locks(profile_dir)
             wait_for_chromium_profile_release(profile_dir, lock_timeout_ms)
             return fetch_xueqiu_json_with_browser_context(profile_dir, api_url, timeout_ms, wait_ms)
-    except XueqiuApiError:
+    except (DomainCoolingDown, XueqiuApiError):
         raise
     except Exception as error:
         raise XueqiuApiError(f"浏览器抓取失败：{summarize_browser_error(error)}") from error
@@ -892,7 +956,7 @@ def fetch_xueqiu_json_with_browser_context(profile_dir: Path, api_url: str, time
                 payload = fetch_xueqiu_json_with_browser_page(page, api_url, timeout_ms, wait_ms)
             cache_xueqiu_browser_cookies(context.cookies([XUEQIU_HOME_URL]))
             return payload
-    except XueqiuApiError:
+    except (DomainCoolingDown, XueqiuApiError):
         raise
     except Exception as error:
         raise XueqiuApiError(f"浏览器抓取失败：{summarize_browser_error(error)}") from error
@@ -900,16 +964,24 @@ def fetch_xueqiu_json_with_browser_context(profile_dir: Path, api_url: str, time
 
 def fetch_xueqiu_json_with_browser_request_once(context: Any, api_url: str, timeout_ms: int) -> dict[str, Any]:
     try:
-        response = context.request.get(
+        with domain_slot(api_url):
+            response = context.request.get(
+                api_url,
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer": XUEQIU_HOME_URL,
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                timeout=timeout_ms,
+            )
+        body = response.text()
+        check_response_risk(
             api_url,
-            headers={
-                "Accept": "application/json, text/plain, */*",
-                "Referer": XUEQIU_HOME_URL,
-                "X-Requested-With": "XMLHttpRequest",
-            },
-            timeout=timeout_ms,
+            status_code=response.status,
+            headers=response.headers,
+            body=body,
         )
-        return parse_xueqiu_json_response(response.text(), response.status, response.url)
+        return parse_xueqiu_json_response(body, response.status, response.url)
     except XueqiuApiError as error:
         if is_xueqiu_browser_interaction_error(error, ""):
             raise XueqiuApiError(
@@ -921,9 +993,12 @@ def fetch_xueqiu_json_with_browser_request_once(context: Any, api_url: str, time
 
 def warm_xueqiu_browser_page(page: Any, timeout_ms: int, wait_ms: int) -> None:
     try:
-        page.goto(XUEQIU_HOME_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+        with domain_slot(XUEQIU_HOME_URL):
+            page.goto(XUEQIU_HOME_URL, wait_until="domcontentloaded", timeout=timeout_ms)
         if wait_ms > 0:
             page.wait_for_timeout(wait_ms)
+    except DomainCoolingDown:
+        raise
     except Exception:
         return
 
@@ -942,42 +1017,48 @@ def fetch_xueqiu_json_with_browser_page(page: Any, api_url: str, timeout_ms: int
 
 
 def fetch_xueqiu_json_with_browser_fetch_once(page: Any, api_url: str, timeout_ms: int) -> dict[str, Any]:
-    result = page.evaluate(
-        """
-        async ({ url, timeout }) => {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), timeout);
-          try {
-            const response = await fetch(url, {
-              credentials: "include",
-              signal: controller.signal,
-              headers: {
-                "Accept": "application/json, text/plain, */*",
-                "X-Requested-With": "XMLHttpRequest"
+    with domain_slot(api_url):
+        result = page.evaluate(
+            """
+            async ({ url, timeout }) => {
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), timeout);
+              try {
+                const response = await fetch(url, {
+                  credentials: "include",
+                  signal: controller.signal,
+                  headers: {
+                    "Accept": "application/json, text/plain, */*",
+                    "X-Requested-With": "XMLHttpRequest"
+                  }
+                });
+                return {
+                  status: response.status,
+                  text: await response.text(),
+                  url: response.url,
+                  contentType: response.headers.get("content-type") || ""
+                };
+              } catch (error) {
+                return {
+                  status: 0,
+                  text: `${error && error.name ? error.name : "Error"}: ${error && error.message ? error.message : error}`,
+                  url,
+                  contentType: ""
+                };
+              } finally {
+                clearTimeout(timer);
               }
-            });
-            return {
-              status: response.status,
-              text: await response.text(),
-              url: response.url,
-              contentType: response.headers.get("content-type") || ""
-            };
-          } catch (error) {
-            return {
-              status: 0,
-              text: `${error && error.name ? error.name : "Error"}: ${error && error.message ? error.message : error}`,
-              url,
-              contentType: ""
-            };
-          } finally {
-            clearTimeout(timer);
-          }
-        }
-        """,
-        {"url": api_url, "timeout": timeout_ms},
-    )
+            }
+            """,
+            {"url": api_url, "timeout": timeout_ms},
+        )
     if int(result.get("status") or 0) == 0:
         raise XueqiuApiError(f"浏览器页面请求失败：{normalize_text(result.get('text'))}")
+    check_response_risk(
+        api_url,
+        status_code=int(result.get("status") or 0),
+        body=str(result.get("text") or ""),
+    )
     return parse_xueqiu_json_response(
         str(result.get("text") or ""),
         int(result.get("status") or 0),
@@ -987,14 +1068,18 @@ def fetch_xueqiu_json_with_browser_fetch_once(page: Any, api_url: str, timeout_m
 
 def fetch_xueqiu_json_with_browser_navigation(page: Any, api_url: str, timeout_ms: int, wait_ms: int, previous_error: Exception) -> dict[str, Any]:
     try:
-        response = page.goto(api_url, wait_until="domcontentloaded", timeout=timeout_ms)
+        with domain_slot(api_url):
+            response = page.goto(api_url, wait_until="domcontentloaded", timeout=timeout_ms)
         if wait_ms > 0:
             page.wait_for_timeout(wait_ms)
+    except DomainCoolingDown:
+        raise
     except Exception as error:
         raise XueqiuApiError(f"{normalize_error(previous_error)}；浏览器打开验证页失败：{summarize_browser_error(error)}") from error
 
     status_code = int(response.status) if response else 200
     page_text = read_browser_page_text(page)
+    check_response_risk(api_url, status_code=status_code, body=page_text)
     try:
         return parse_xueqiu_json_response(page_text, status_code, page.url or api_url)
     except XueqiuApiError as error:
@@ -1187,7 +1272,7 @@ def build_url(url: str, params: dict[str, Any] | None = None) -> str:
 def should_retry_with_browser(error: Exception) -> bool:
     if not xueqiu_browser_enabled():
         return False
-    if xueqiu_browser_headless() and get_recent_xueqiu_browser_failure():
+    if get_recent_xueqiu_browser_failure():
         return False
     return is_retryable_xueqiu_error(error)
 

@@ -19,7 +19,7 @@
     { "appId": 570, "name": "Dota 2", "nameZh": "刀塔 2", "publisher": "Valve", "group": "global" },
     { "appId": 578080, "name": "PUBG: BATTLEGROUNDS", "nameZh": "绝地求生", "publisher": "KRAFTON", "group": "global" },
     { "appId": 1172470, "name": "Apex Legends", "nameZh": "Apex 英雄", "publisher": "EA", "group": "global" },
-    { "appId": 271590, "name": "Grand Theft Auto V", "nameZh": "侠盗猎车手 5", "publisher": "Rockstar", "group": "global" },
+    { "appId": 3240220, "name": "Grand Theft Auto V Enhanced", "nameZh": "侠盗猎车手 5 增强版", "publisher": "Rockstar", "group": "global" },
     { "appId": 252490, "name": "Rust", "nameZh": "腐蚀", "publisher": "Facepunch", "group": "global" },
     { "appId": 440, "name": "Team Fortress 2", "nameZh": "军团要塞 2", "publisher": "Valve", "group": "global" },
     { "appId": 236390, "name": "War Thunder", "nameZh": "战争雷霆", "publisher": "Gaijin", "group": "global" },

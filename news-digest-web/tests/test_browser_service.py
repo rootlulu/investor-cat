@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +22,51 @@ def test_summarize_browser_error_maps_known_errors():
 def test_summarize_browser_error_passthrough_unknown():
     msg = bs.summarize_browser_error(Exception("some weird thing happened"))
     assert "some weird thing happened" in msg
+
+
+def test_browser_fetch_retries_only_transient_errors_with_policy_backoff(monkeypatch):
+    calls = 0
+
+    def fetch():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("connection reset")
+        return "ok"
+
+    monkeypatch.setattr(bs, "_run_on_browser_thread", lambda callback: callback())
+    monkeypatch.setattr(bs, "_safe_reset_session", lambda: None)
+    sleep = patch.object(bs.time, "sleep").start()
+    retry_delay = patch.object(bs.REQUEST_COORDINATOR, "retry_delay", return_value=0.25).start()
+    try:
+        assert bs._run_browser_fetch(fetch, "https://example.com", retries=1) == "ok"
+    finally:
+        patch.stopall()
+
+    assert calls == 2
+    retry_delay.assert_called_once_with("https://example.com", 0)
+    sleep.assert_called_once_with(0.25)
+
+
+def test_browser_fetch_does_not_retry_content_errors(monkeypatch):
+    calls = 0
+
+    def fetch():
+        nonlocal calls
+        calls += 1
+        raise ValueError("invalid response shape")
+
+    monkeypatch.setattr(bs, "_run_on_browser_thread", lambda callback: callback())
+    monkeypatch.setattr(bs, "_safe_reset_session", lambda: None)
+    sleep = patch.object(bs.time, "sleep").start()
+    try:
+        with pytest.raises(ValueError, match="invalid response shape"):
+            bs._run_browser_fetch(fetch, "https://example.com", retries=1)
+    finally:
+        patch.stopall()
+
+    assert calls == 1
+    sleep.assert_not_called()
 
 
 def test_summarize_browser_error_interactive_login_hint_overrides():
@@ -192,11 +239,91 @@ def test_resolve_browser_proxy_auto_detects_wsl_host(monkeypatch):
     }
 
 
+def test_v37_fetch_calls_share_one_worker_thread():
+    caller_ids: set[int] = set()
+
+    def invoke(_: int) -> int:
+        caller_ids.add(threading.get_ident())
+        return bs._run_on_browser_thread(threading.get_ident)
+
+    with ThreadPoolExecutor(max_workers=4) as callers:
+        worker_ids = list(callers.map(invoke, range(12)))
+
+    assert len(caller_ids) > 1
+    assert len(set(worker_ids)) == 1
+    assert worker_ids[0] not in caller_ids
+
+
+def test_v38_automated_session_uses_non_persistent_context(monkeypatch, tmp_path):
+    events: list[tuple[str, object]] = []
+
+    class _Context:
+        def set_extra_http_headers(self, headers):
+            events.append(("headers", headers))
+
+        def close(self):
+            events.append(("context.close", None))
+
+    context = _Context()
+
+    class _Browser:
+        def new_context(self, **kwargs):
+            events.append(("new_context", kwargs))
+            return context
+
+        def close(self):
+            events.append(("browser.close", None))
+
+    class _Chromium:
+        def launch(self, **kwargs):
+            events.append(("launch", kwargs))
+            return _Browser()
+
+        def launch_persistent_context(self, *args, **kwargs):
+            raise AssertionError("automated fetch must not use a persistent profile")
+
+    class _Playwright:
+        chromium = _Chromium()
+
+        def stop(self):
+            events.append(("playwright.stop", None))
+
+    class _Manager:
+        def start(self):
+            return _Playwright()
+
+    monkeypatch.setattr(bs, "_CONTEXT", None)
+    monkeypatch.setattr(bs, "_BROWSER", None, raising=False)
+    monkeypatch.setattr(bs, "_PLAYWRIGHT", None)
+    monkeypatch.setattr(bs, "_CONTEXT_PROXY_KEY", None)
+    monkeypatch.setattr(
+        bs,
+        "_settings",
+        lambda: {
+            "profileDir": str(tmp_path / "must-not-be-used"),
+            "headless": True,
+            "channel": "chromium",
+        },
+    )
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: _Manager())
+
+    proxy = {"server": "http://172.19.128.1:7897"}
+    assert bs._ensure_session(proxy) is context
+    launch_options = next(value for name, value in events if name == "launch")
+    assert launch_options["proxy"] == proxy
+    assert any(name == "new_context" for name, _ in events)
+
+    bs._safe_reset_session()
+    assert ("context.close", None) in events
+    assert ("browser.close", None) in events
+    assert ("playwright.stop", None) in events
+
+
 def test_ensure_session_stops_partial_playwright_on_launch_failure(monkeypatch, tmp_path):
     stopped = {"value": False}
 
     class _Chromium:
-        def launch_persistent_context(self, *args, **kwargs):
+        def launch(self, *args, **kwargs):
             raise RuntimeError("libnspr4.so: cannot open shared object file")
 
     class _Playwright:
@@ -210,6 +337,7 @@ def test_ensure_session_stops_partial_playwright_on_launch_failure(monkeypatch, 
             return _Playwright()
 
     monkeypatch.setattr(bs, "_CONTEXT", None)
+    monkeypatch.setattr(bs, "_BROWSER", None)
     monkeypatch.setattr(bs, "_PLAYWRIGHT", None)
     monkeypatch.setattr(bs, "_CONTEXT_PROXY_KEY", None)
     monkeypatch.setattr(bs, "_settings", lambda: {"profileDir": str(tmp_path / "profile")})
@@ -229,6 +357,7 @@ def test_fetch_page_json_response_via_browser(monkeypatch):
         url = "https://api.steampowered.com/IStoreTopSellersService/GetWeeklyTopSellers/v1"
         ok = True
         status = 200
+        headers = {"content-type": "application/json; charset=UTF-8"}
 
         def json(self):
             return payload
@@ -257,3 +386,130 @@ def test_fetch_page_json_response_via_browser(monkeypatch):
         "IStoreTopSellersService/GetWeeklyTopSellers",
     )
     assert result == payload
+
+
+def test_v40_binary_service_response_is_refetched_as_json(monkeypatch):
+    payload = {"response": {"ranks": [{"rank": 1, "appid": 730}]}}
+    requested_urls: list[str] = []
+
+    class _BinaryResponse:
+        url = (
+            "https://api.steampowered.com/"
+            "IStoreTopSellersService/GetWeeklyTopSellers/v1?input_protobuf_encoded=abc%3D"
+        )
+        ok = True
+        status = 200
+        headers = {"content-type": "application/octet-stream"}
+
+        def json(self):
+            raise AssertionError("protobuf response must not be decoded as UTF-8 JSON")
+
+    class _JsonResponse:
+        url = _BinaryResponse.url + "&format=json"
+        ok = True
+        status = 200
+        headers = {"content-type": "application/json; charset=UTF-8"}
+
+        def json(self):
+            return payload
+
+    class _ResponseInfo:
+        value = _BinaryResponse()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    class _ResponsePage(_FakePage):
+        def expect_response(self, predicate, timeout=None):
+            assert predicate(_BinaryResponse())
+            return _ResponseInfo()
+
+    class _ResponseContext(_FakeContext):
+        def new_page(self):
+            return _ResponsePage("")
+
+        @property
+        def request(self):
+            class _Request:
+                def get(self, url, timeout=None):
+                    requested_urls.append(url)
+                    return _JsonResponse()
+
+            return _Request()
+
+    monkeypatch.setattr(bs, "_ensure_session", lambda proxy=None: _ResponseContext("", {}))
+    result = bs.fetch_page_json_response_via_browser(
+        "https://store.steampowered.com/charts/topselling/global",
+        "IStoreTopSellersService/GetWeeklyTopSellers",
+    )
+
+    assert result == payload
+    assert requested_urls == [_BinaryResponse.url + "&format=json"]
+
+
+def test_page_json_response_can_select_and_transform_matching_service_call(monkeypatch):
+    payload = {"response": {"ids": [{"appid": 3240220}]}}
+    requested_urls: list[str] = []
+
+    class _WrongResponse:
+        url = "https://api.steampowered.com/IStoreTopSellersService/GetWeeklyTopSellers/v1?scope=SG"
+
+    class _TargetResponse:
+        url = "https://api.steampowered.com/IStoreTopSellersService/GetWeeklyTopSellers/v1?scope=global&count=20"
+        ok = True
+        status = 200
+        headers = {"content-type": "application/octet-stream"}
+
+    class _JsonResponse:
+        url = _TargetResponse.url
+        ok = True
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return payload
+
+    class _ResponseInfo:
+        value = _TargetResponse()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    class _ResponsePage(_FakePage):
+        def expect_response(self, predicate, timeout=None):
+            assert predicate(_WrongResponse()) is False
+            assert predicate(_TargetResponse()) is True
+            return _ResponseInfo()
+
+    class _ResponseContext(_FakeContext):
+        def new_page(self):
+            return _ResponsePage("")
+
+        @property
+        def request(self):
+            class _Request:
+                def get(self, url, timeout=None):
+                    requested_urls.append(url)
+                    return _JsonResponse()
+
+            return _Request()
+
+    monkeypatch.setattr(bs, "_ensure_session", lambda proxy=None: _ResponseContext("", {}))
+
+    result = bs.fetch_page_json_response_via_browser(
+        "https://store.steampowered.com/charts/topsellers/global/2026-7-14",
+        "IStoreTopSellersService/GetWeeklyTopSellers",
+        response_url_predicate=lambda url: "scope=global" in url,
+        response_url_transform=lambda url: url.replace("count=20", "count=100"),
+    )
+
+    assert result == payload
+    assert requested_urls == [
+        "https://api.steampowered.com/IStoreTopSellersService/GetWeeklyTopSellers/v1?scope=global&count=100&format=json"
+    ]

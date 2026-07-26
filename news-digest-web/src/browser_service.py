@@ -7,12 +7,12 @@
 - ``apply_browser_library_path``：把 Chromium 运行库路径注入 ``LD_LIBRARY_PATH``。
 - ``summarize_browser_error``：把常见 Playwright 异常转成中文可读信息。
 - ``launch_browser_context``：上下文管理器，等价于 ``launch_persistent_context``（headless + 真实 UA/locale/时区）。
-- ``fetch_html_via_browser`` / ``fetch_json_via_browser``：基于**进程级单例浏览器会话**取数，
-  供游戏区域等高频抓取复用，避免每个请求都重启浏览器。
+- ``fetch_html_via_browser`` / ``fetch_json_via_browser``：基于**专用单线程 worker +
+  非持久 BrowserContext** 取数，供游戏区域等高频抓取复用。
 - ``close_browser_session``：关闭单例会话（已注册 atexit）。
 
-浏览器模拟用于规避 Steam 等对裸 HTTP 的限流/封禁：真实 UA、中文 locale、上海时区、
-持久化 profile，使其看起来更像正常用户浏览器。
+浏览器模拟用于规避 Steam 等对裸 HTTP 的限流/封禁：真实 UA、中文 locale、上海时区。
+自动取数不使用持久 profile；需要保存登录态的业务显式使用 ``launch_browser_context``。
 """
 
 from __future__ import annotations
@@ -20,11 +20,21 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
-from urllib.parse import urlparse
+from typing import Any, Callable, Iterator
+from urllib.parse import parse_qsl, urlencode, urlparse
+
+from .request_coordinator import (
+    DomainCoolingDown,
+    REQUEST_COORDINATOR,
+    check_response_risk,
+    domain_slot,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BROWSER_SETTINGS_PATH = ROOT_DIR / "config" / "browser_settings.json"
@@ -39,7 +49,10 @@ DEFAULT_TIMEOUT_MS = 20000
 DEFAULT_VIEWPORT = {"width": 1280, "height": 900}
 
 _BROWSER_LOCK = threading.Lock()
+_BROWSER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="browser-service")
+_BROWSER_WORKER_ID: int | None = None
 _PLAYWRIGHT = None
+_BROWSER = None
 _CONTEXT = None
 _CONTEXT_PROXY_KEY: str | None = None
 
@@ -163,6 +176,13 @@ def resolve_browser_proxy(url: str) -> dict[str, str] | None:
 
 def _proxy_key(proxy: dict[str, str] | None) -> str:
     return json.dumps(proxy or {}, sort_keys=True, ensure_ascii=True)
+
+
+def _with_query_value(url: str, name: str, value: str) -> str:
+    parsed = urlparse(url)
+    query = [(key, item) for key, item in parse_qsl(parsed.query, keep_blank_values=True) if key != name]
+    query.append((name, value))
+    return parsed._replace(query=urlencode(query)).geturl()
 
 
 def _resolve_profile_path(value: Any) -> Path:
@@ -302,14 +322,33 @@ def launch_browser_context(
 # ---------------------------------------------------------------------------
 # 进程级单例浏览器会话（供游戏区域等高频抓取复用）
 # ---------------------------------------------------------------------------
+def _run_on_browser_thread(callback: Any) -> Any:
+    """Run every sync Playwright operation on one thread for its full lifecycle."""
+    global _BROWSER_WORKER_ID
+    if threading.get_ident() == _BROWSER_WORKER_ID:
+        return callback()
+
+    def invoke() -> Any:
+        global _BROWSER_WORKER_ID
+        _BROWSER_WORKER_ID = threading.get_ident()
+        return callback()
+
+    return _BROWSER_EXECUTOR.submit(invoke).result()
+
+
 def _safe_reset_session() -> None:
-    global _PLAYWRIGHT, _CONTEXT, _CONTEXT_PROXY_KEY
-    ctx, pw = _CONTEXT, _PLAYWRIGHT
-    _CONTEXT, _PLAYWRIGHT = None, None
+    global _PLAYWRIGHT, _BROWSER, _CONTEXT, _CONTEXT_PROXY_KEY
+    ctx, browser, pw = _CONTEXT, _BROWSER, _PLAYWRIGHT
+    _CONTEXT, _BROWSER, _PLAYWRIGHT = None, None, None
     _CONTEXT_PROXY_KEY = None
     if ctx is not None:
         try:
             ctx.close()
+        except Exception:
+            pass
+    if browser is not None:
+        try:
+            browser.close()
         except Exception:
             pass
     if pw is not None:
@@ -320,64 +359,116 @@ def _safe_reset_session() -> None:
 
 
 def _ensure_session(proxy: dict[str, str] | None = None) -> Any:
-    """在调用方已持有 _BROWSER_LOCK 时调用。返回单例持久化上下文。"""
-    global _PLAYWRIGHT, _CONTEXT, _CONTEXT_PROXY_KEY
+    """在调用方已持有 _BROWSER_LOCK 时调用。返回单例非持久上下文。"""
+    global _PLAYWRIGHT, _BROWSER, _CONTEXT, _CONTEXT_PROXY_KEY
     proxy_key = _proxy_key(proxy)
     if _CONTEXT is not None and _CONTEXT_PROXY_KEY == proxy_key:
         return _CONTEXT
-    if _CONTEXT is not None:
+    if _CONTEXT is not None or _BROWSER is not None or _PLAYWRIGHT is not None:
         _safe_reset_session()
     apply_browser_library_path()
     from playwright.sync_api import sync_playwright
 
     settings = _settings()
-    profile_dir = _resolve_profile_path(settings.get("profileDir") or "data/browser-profile")
-    Path(profile_dir).mkdir(parents=True, exist_ok=True)
     playwright = sync_playwright().start()
     launch_options: dict[str, Any] = {
         "headless": bool(settings.get("headless", True)),
         "channel": settings.get("channel", "chromium"),
+        "args": settings.get("args") or DEFAULT_BROWSER_ARGS,
+    }
+    context_options: dict[str, Any] = {
         "viewport": settings.get("viewport") or DEFAULT_VIEWPORT,
         "locale": settings.get("locale", "zh-CN"),
         "timezone_id": settings.get("timezoneId", "Asia/Shanghai"),
         "user_agent": settings.get("userAgent", DEFAULT_BROWSER_UA),
-        "args": settings.get("args") or DEFAULT_BROWSER_ARGS,
     }
     executable = str(settings.get("executable") or "").strip()
     if executable:
         launch_options["executable_path"] = executable
     if proxy:
         launch_options["proxy"] = proxy
+    browser = None
+    context = None
     try:
-        context = playwright.chromium.launch_persistent_context(str(profile_dir), **launch_options)
+        browser = playwright.chromium.launch(**launch_options)
+        context = browser.new_context(**context_options)
+        context.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
     except Exception:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
         playwright.stop()
         raise
-    context.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
     _PLAYWRIGHT = playwright
+    _BROWSER = browser
     _CONTEXT = context
     _CONTEXT_PROXY_KEY = proxy_key
     return context
 
 
 def close_browser_session() -> None:
-    with _BROWSER_LOCK:
-        _safe_reset_session()
-
-
-def _run_browser_fetch(fetch_fn: Any, retries: int = 2) -> Any:
-    first_error: Exception | None = None
-    for attempt in range(retries + 1):
+    def close() -> None:
         with _BROWSER_LOCK:
-            try:
-                return fetch_fn()
-            except Exception as error:  # noqa: BLE001 - 由调用方决定如何呈现
-                if first_error is None:
-                    first_error = error
-                _safe_reset_session()
-        if attempt >= retries:
-            break
-    raise first_error if first_error else RuntimeError("browser fetch failed")
+            _safe_reset_session()
+
+    try:
+        _run_on_browser_thread(close)
+    except RuntimeError:
+        # Interpreter shutdown may stop the executor before our atexit hook.
+        pass
+
+
+def _run_browser_fetch(fetch_fn: Any, url: str, retries: int = 1) -> Any:
+    def run() -> Any:
+        first_error: Exception | None = None
+        for attempt in range(retries + 1):
+            retryable = False
+            with _BROWSER_LOCK:
+                try:
+                    return fetch_fn()
+                except DomainCoolingDown:
+                    _safe_reset_session()
+                    raise
+                except Exception as error:  # noqa: BLE001 - 由调用方决定如何呈现
+                    if first_error is None:
+                        first_error = error
+                    retryable = _browser_error_is_retryable(error)
+                    _safe_reset_session()
+            if attempt >= retries or not retryable:
+                break
+            time.sleep(REQUEST_COORDINATOR.retry_delay(url, attempt))
+        raise first_error if first_error else RuntimeError("browser fetch failed")
+
+    return _run_on_browser_thread(run)
+
+
+def _browser_error_is_retryable(error: Exception) -> bool:
+    if isinstance(error, (ConnectionError, TimeoutError)):
+        return True
+    message = str(error).lower()
+    if re.search(r"\bhttp\s+5\d\d\b", message):
+        return True
+    return any(
+        token in message
+        for token in (
+            "timeout",
+            "timed out",
+            "net::err_",
+            "connection reset",
+            "connection closed",
+            "target closed",
+            "browser has been closed",
+            "browser crash",
+            "browser crashed",
+        )
+    )
 
 
 def fetch_html_via_browser(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> str:
@@ -388,40 +479,92 @@ def fetch_html_via_browser(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> st
         context.set_default_timeout(timeout_ms)
         page = context.new_page()
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            wait_ms = max(0, int(_settings().get("waitMs") or 0))
-            if wait_ms:
-                page.wait_for_timeout(wait_ms)
-            return page.content()
+            with domain_slot(url):
+                response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                wait_ms = max(0, int(_settings().get("waitMs") or 0))
+                if wait_ms:
+                    page.wait_for_timeout(wait_ms)
+                html = page.content()
+                check_response_risk(
+                    url,
+                    status_code=_browser_response_status(response),
+                    headers=_browser_response_headers(response),
+                    body=html,
+                )
+                return html
         finally:
             try:
                 page.close()
             except Exception:
                 pass
 
-    return _run_browser_fetch(_run)
+    return _run_browser_fetch(_run, url)
 
 
 def fetch_page_json_response_via_browser(
     page_url: str,
     response_url_contains: str,
     timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    *,
+    response_url_predicate: Callable[[str], bool] | None = None,
+    response_url_transform: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
-    """Open a page and return the JSON response matching ``response_url_contains``."""
+    """Open a page and return the JSON response matching ``response_url_contains``.
+
+    Steam service pages request protobuf by default. When the captured response
+    is not JSON, replay its exact URL with the official ``format=json`` switch.
+    ``response_url_predicate`` can disambiguate multiple calls to the same
+    service; ``response_url_transform`` can adjust the captured request (for
+    example, increasing an official page size) before the JSON replay.
+    """
 
     def _run() -> dict[str, Any]:
         context = _ensure_session(resolve_browser_proxy(page_url))
         context.set_default_timeout(timeout_ms)
         page = context.new_page()
         try:
-            with page.expect_response(
-                lambda response: response_url_contains in response.url,
-                timeout=timeout_ms,
-            ) as response_info:
-                page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
-            response = response_info.value
-            if not response.ok:
-                raise RuntimeError(f"browser response HTTP {response.status}: {response.url}")
+            def matches(response: Any) -> bool:
+                response_url = _browser_response_url(response, "")
+                if response_url_contains not in response_url:
+                    return False
+                if response_url_predicate is None:
+                    return True
+                try:
+                    return bool(response_url_predicate(response_url))
+                except Exception:
+                    return False
+
+            with domain_slot(page_url):
+                with page.expect_response(
+                    matches,
+                    timeout=timeout_ms,
+                ) as response_info:
+                    page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                response = response_info.value
+                content_type = str(_browser_response_headers(response).get("content-type") or "").lower()
+                check_response_risk(
+                    _browser_response_url(response, page_url),
+                    status_code=_browser_response_status(response),
+                    headers=_browser_response_headers(response),
+                    body=_browser_response_text(response) if "json" in content_type else None,
+                )
+                if not _browser_response_ok(response):
+                    raise RuntimeError(f"browser response HTTP {response.status}: {response.url}")
+            if response_url_transform is not None or "json" not in content_type:
+                response_url = _browser_response_url(response, page_url)
+                if response_url_transform is not None:
+                    response_url = response_url_transform(response_url)
+                json_url = _with_query_value(response_url, "format", "json")
+                with domain_slot(json_url):
+                    response = context.request.get(json_url, timeout=timeout_ms)
+                    check_response_risk(
+                        json_url,
+                        status_code=_browser_response_status(response),
+                        headers=_browser_response_headers(response),
+                        body=_browser_response_text(response),
+                    )
+                    if not _browser_response_ok(response):
+                        raise RuntimeError(f"browser JSON response HTTP {response.status}: {response.url}")
             payload = response.json()
             if not isinstance(payload, dict):
                 raise RuntimeError(f"browser response is not a JSON object: {response.url}")
@@ -432,7 +575,7 @@ def fetch_page_json_response_via_browser(
             except Exception:
                 pass
 
-    return _run_browser_fetch(_run)
+    return _run_browser_fetch(_run, page_url)
 
 
 def fetch_json_via_browser(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> dict[str, Any]:
@@ -441,10 +584,55 @@ def fetch_json_via_browser(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> di
     def _run() -> dict[str, Any]:
         context = _ensure_session(resolve_browser_proxy(url))
         context.set_default_timeout(timeout_ms)
-        response = context.request.get(url, timeout=timeout_ms)
-        return response.json()
+        with domain_slot(url):
+            response = context.request.get(url, timeout=timeout_ms)
+            check_response_risk(
+                url,
+                status_code=_browser_response_status(response),
+                headers=_browser_response_headers(response),
+                body=_browser_response_text(response),
+            )
+            if not _browser_response_ok(response):
+                raise RuntimeError(
+                    f"browser response HTTP {_browser_response_status(response)}: "
+                    f"{_browser_response_url(response, url)}"
+                )
+            return response.json()
 
-    return _run_browser_fetch(_run)
+    return _run_browser_fetch(_run, url)
+
+
+def _browser_response_status(response: Any) -> int:
+    value = getattr(response, "status", 200) if response is not None else 200
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 200
+
+
+def _browser_response_ok(response: Any) -> bool:
+    value = getattr(response, "ok", None) if response is not None else None
+    if isinstance(value, bool):
+        return value
+    return 200 <= _browser_response_status(response) < 400
+
+
+def _browser_response_headers(response: Any) -> dict[str, Any]:
+    headers = getattr(response, "headers", None) if response is not None else None
+    return headers if isinstance(headers, dict) else {}
+
+
+def _browser_response_text(response: Any) -> str:
+    value = getattr(response, "text", "") if response is not None else ""
+    try:
+        return str(value() if callable(value) else value or "")
+    except Exception:
+        return ""
+
+
+def _browser_response_url(response: Any, fallback: str) -> str:
+    value = getattr(response, "url", "") if response is not None else ""
+    return str(value or fallback)
 
 
 atexit.register(close_browser_session)

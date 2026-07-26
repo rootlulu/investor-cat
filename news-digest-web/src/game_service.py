@@ -14,6 +14,8 @@ from typing import Any
 import httpx
 
 from .commodity_service import load_config, resolve_sqlite_path
+from .game_watchlist_service import filter_rows_for_watchlist, load_watchlist
+from .request_coordinator import coordinate_httpx_client
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 GAME_CACHE_LOCK = asyncio.Lock()
@@ -175,6 +177,8 @@ FIELD_ALIASES = {
 
 async def get_games(refresh: bool = False, allow_stale: bool = True, force: bool = False) -> dict[str, Any]:
     config = load_config()
+    catalog = await asyncio.to_thread(load_watchlist)
+    watchlist_revision = catalog.get("revision", "")
     fetch_config = config.get("fetch", {})
     ttl_seconds = int(fetch_config.get("min_refresh_interval_seconds", 1800))
     timeout = float(fetch_config.get("request_timeout_seconds", 8))
@@ -186,6 +190,7 @@ async def get_games(refresh: bool = False, allow_stale: bool = True, force: bool
             and not refresh
             and GAME_CACHE["data"]
             and GAME_CACHE["data"].get("schemaVersion") == GAME_SCHEMA_VERSION
+            and GAME_CACHE["data"].get("watchlistRevision") == watchlist_revision
             and datetime.now(UTC) < GAME_CACHE["expires_at"]
         ):
             cached = dict(GAME_CACHE["data"])
@@ -195,7 +200,11 @@ async def get_games(refresh: bool = False, allow_stale: bool = True, force: bool
             return cached
 
     stored = await load_latest_games(db_path)
-    stored_schema_valid = bool(stored and stored.get("schemaVersion") == GAME_SCHEMA_VERSION)
+    stored_schema_valid = bool(
+        stored
+        and stored.get("schemaVersion") == GAME_SCHEMA_VERSION
+        and stored.get("watchlistRevision") == watchlist_revision
+    )
     stored_is_fresh = bool(stored_schema_valid and parse_dt(stored.get("expiresAt", "")) > datetime.now(UTC))
     if not force and stored and stored_schema_valid and ((allow_stale and not refresh) or stored_is_fresh):
         stored["cached"] = True
@@ -208,12 +217,17 @@ async def get_games(refresh: bool = False, allow_stale: bool = True, force: bool
         return stored
 
     revenue_rows, ranking_rows, errors, source_files = await asyncio.to_thread(load_imported_data)
-    if not any(row.get("sourceType") == "sensor_tower" for row in revenue_rows):
+    if catalog.get("games") and not any(row.get("sourceType") == "sensor_tower" for row in revenue_rows):
         public_rows, public_errors, public_source = await fetch_public_sensor_tower_revenue(timeout)
         revenue_rows.extend(public_rows)
         errors.extend(public_errors)
         if public_source:
             source_files.append(public_source)
+    revenue_rows, ranking_rows, watchlist_warnings = filter_game_dashboard_rows(
+        revenue_rows,
+        ranking_rows,
+        catalog,
+    )
     countries = configured_game_countries(config)
     rank_limit = configured_rank_limit(config)
     markets = build_markets(revenue_rows, ranking_rows, countries, rank_limit)
@@ -225,6 +239,8 @@ async def get_games(refresh: bool = False, allow_stale: bool = True, force: bool
     now = datetime.now(UTC)
     data = {
         "schemaVersion": GAME_SCHEMA_VERSION,
+        "watchlistRevision": watchlist_revision,
+        "watchlistCount": len(catalog.get("games") or []),
         "generatedAt": now.isoformat(),
         "savedAt": now.isoformat(),
         "expiresAt": (now + timedelta(seconds=ttl_seconds)).isoformat(),
@@ -242,6 +258,7 @@ async def get_games(refresh: bool = False, allow_stale: bool = True, force: bool
         "months": months,
         "defaultMonth": months[0] if months else current_month(),
         "summary": summary,
+        "watchlistWarnings": watchlist_warnings,
         "errors": errors,
     }
 
@@ -250,6 +267,45 @@ async def get_games(refresh: bool = False, allow_stale: bool = True, force: bool
         GAME_CACHE["data"] = data
         GAME_CACHE["expires_at"] = parse_dt(data["expiresAt"])
     return data
+
+
+async def invalidate_game_cache() -> None:
+    async with GAME_CACHE_LOCK:
+        GAME_CACHE["data"] = None
+        GAME_CACHE["expires_at"] = datetime.min.replace(tzinfo=UTC)
+
+
+def filter_game_dashboard_rows(
+    revenue_rows: list[dict[str, Any]],
+    ranking_rows: list[dict[str, Any]],
+    catalog: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    filtered_revenue: list[dict[str, Any]] = []
+    filtered_rankings: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    revenue_groups = (
+        (
+            "sensorTower",
+            [row for row in revenue_rows if row.get("sourceType") == "sensor_tower"],
+        ),
+        (
+            "reported",
+            [row for row in revenue_rows if row.get("sourceType") != "sensor_tower"],
+        ),
+    )
+    for source, rows in revenue_groups:
+        matched, source_warnings = filter_rows_for_watchlist(rows, source=source, catalog=catalog)
+        filtered_revenue.extend(matched)
+        warnings.extend(source_warnings)
+
+    for provider in ("qimai", "diandian"):
+        rows = [row for row in ranking_rows if row.get("provider") == provider]
+        matched, source_warnings = filter_rows_for_watchlist(rows, source=provider, catalog=catalog)
+        filtered_rankings.extend(matched)
+        warnings.extend(source_warnings)
+
+    return filtered_revenue, filtered_rankings, warnings
 
 
 def load_imported_data() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[dict[str, Any]]]:
@@ -290,6 +346,7 @@ async def fetch_public_sensor_tower_revenue(timeout: float) -> tuple[list[dict[s
             timeout=timeout,
             follow_redirects=True,
         ) as client:
+            coordinate_httpx_client(client)
             config = await gacharevenue_api(client, "config")
             revenue = await gacharevenue_api(client, "revenue")
     except Exception as error:
@@ -758,6 +815,7 @@ def format_market_row(
     return clean_dict(
         {
             "rank": row.get("rank") or fallback_rank,
+            "watchlistId": row.get("watchlistId"),
             "game": row.get("game"),
             "gameZh": row.get("gameZh"),
             "publisher": row.get("publisher"),
@@ -876,6 +934,7 @@ def format_ranking_row(row: dict[str, Any]) -> dict[str, Any]:
     return clean_dict(
         {
             "rank": row.get("rank"),
+            "watchlistId": row.get("watchlistId"),
             "game": row.get("game"),
             "gameZh": row.get("gameZh"),
             "publisher": row.get("publisher"),
