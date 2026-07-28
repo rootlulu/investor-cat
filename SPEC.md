@@ -303,7 +303,7 @@ V67: 单一 `news_digest` MCP → 暴露项目确定性快照/证据；分析执
 V68: 服务默认 `127.0.0.1`；LAN 模式显式 opt-in；未认证写接口 ⊥ 默认 LAN 可达。
 V69: ∀ P0 bug → 针对性回归测试；全量 Python tests + `npm run build` + 1440/390 browser QA exit 0。
 V70: API 旧字段/现有 routes/7日雪球窗口/latest snapshot 不回归；任务 diff ⊥ 无关用户文件。
-V71: 运行 SQLite/PYC/本地 watchlist/构建产物 ⊥ 新增跟踪；清理既有跟踪需独立确认。
+V71: `data/` + 运行 PYC/本地 watchlist/构建产物 ⊥ Git 跟踪；公开数据模板 ! `examples/data/`；清理既有跟踪需独立确认。
 V72: 今日页 source health 非 ok → qualitySummary 同步计入；⊥ 健康告警与“状态完整”并存。
 V73: `GET /api/today` → 仅读取已有快照且每领域等待有界；启动刷新/单源卡住 ⊥ 拖死首屏，超时域进入 health/risk。
 V74: 投资快照仅加字段的 schema 升级 → 旧快照惰性迁移后立即可读；⊥ 仅因版本号不等而同步等待实时抓取。
@@ -386,6 +386,7 @@ B49|2026-07-26|财报读边界测试使用仓库未配置的 `pytest.mark.asynci
 B50|2026-07-26|MCP 隔离环境只装运行依赖，误用 `.venv-mcp -m pytest` 导致无 pytest|V88；stdio smoke 用测试文件自带 `unittest` 入口
 B51|2026-07-26|直接执行 stdio 测试时 `sys.path[0]=tests`，尾部安全测试无法 import `src`|V89；显式加入仓库根
 B52|2026-07-26|真实页面 QA 点击抓取按钮时，浏览器自动化未暴露可控原生确认框并在超时后启动了抓取|V90；不再在真实本机 API 点击副作用按钮，以静态回归+只读页面检查验证边界
+B118|2026-07-28|目录提升沿用既有 Git index；`.gitignore` ⊥ 取消 tracked `data/` → GitHub 仍展示运行数据|V71；`data/` 全量 ignore + `git rm --cached`，模板移 `examples/data/`
 
 ## §G（关注游戏配置）
 

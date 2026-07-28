@@ -27,28 +27,8 @@ dist/
 public/
 !public/.gitkeep
 
-# Local runtime data and caches
-data/*.sqlite
-data/*.sqlite-*
-data/stock_watch_details.json
-data/financial_snapshots.json
-data/browser-profile/
-data/xueqiu-auth-profile/
-data/xueqiu-browser-profile/
-data/playwright-libs/
-data/game-provider-profiles/
-data/game-provider-state.json
-
-# Local imported datasets; keep templates
-data/game_metrics.csv
-data/game_metrics.json
-data/game_rankings.csv
-data/game_rankings.json
-data/game_reported_revenue.csv
-data/game_reported_revenue.json
-data/game_sensor_tower_revenue.csv
-data/game_sensor_tower_revenue.json
-!data/*.example
+# Local runtime data, caches, and imports
+/data/
 
 # Local user configuration
 config/stock_watchlist.json

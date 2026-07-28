@@ -31,7 +31,7 @@
 
 - 默认读取最近一个完整自然月的全球与中国移动游戏流水榜，目标各 100 条；页面同时显示精确美元金额、月份、采用来源、统计口径以及目标/可用/缺失数量。
 - 同一游戏、市场和月份存在多来源时，优先级为：官方披露 > 权威媒体披露 > Sensor Tower 正式导出/授权 API > 公开估算转述。较低优先级金额保留为备选证据，不覆盖官方值。
-- 授权 API Token 仅从服务端环境变量 `SENSORTOWER_AUTH_TOKEN` 读取；也可导入 `data/game_sensor_tower_revenue.csv/json` 与 `data/game_reported_revenue.csv/json`。
+- 授权 API Token 仅从服务端环境变量 `SENSORTOWER_AUTH_TOKEN` 读取；也可导入 `data/game_sensor_tower_revenue.csv/json` 与 `data/game_reported_revenue.csv/json`。公开模板位于 `examples/data/`，复制到本地 `data/` 后使用。
 - 无授权数据时使用 GACHAREVENUE 的公开 Sensor Tower 转述兜底。该来源仅覆盖移动端且偏二游/抽卡游戏；中国 Android 按中国 iOS 估算的 `1.75` 倍推算（中国合计为 iOS 的 `2.75` 倍），不含 PC、主机和广告收入。
 - 来源不足 100 条时保持真实缺口并显示原因，不用 0 或虚构游戏补榜；因此公开兜底下中国榜可能少于 100 条。
 

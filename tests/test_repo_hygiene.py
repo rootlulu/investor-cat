@@ -33,15 +33,29 @@ def test_v71_runtime_artifacts_are_ignored_for_future_additions(path: str) -> No
     assert result.returncode == 0, f"runtime artifact is not ignored: {path}"
 
 
+def test_v71_data_directory_is_not_tracked() -> None:
+    result = subprocess.run(
+        ["git", "ls-files", "--", "data"],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert not result.stdout.strip(), "data directory must remain local-only"
+
+
 @pytest.mark.parametrize(
     "path",
     [
         "src/app.py",
         "config/sources.json",
-        "data/game_metrics.csv.example",
+        "examples/data/game_metrics.csv.example",
     ],
 )
 def test_v71_source_and_templates_remain_trackable(path: str) -> None:
+    assert (ROOT_DIR / path).is_file(), f"source or template is missing: {path}"
+
     result = subprocess.run(
         ["git", "check-ignore", "--no-index", "--quiet", path],
         cwd=ROOT_DIR,
