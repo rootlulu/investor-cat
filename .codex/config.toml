@@ -1,0 +1,35 @@
+[mcp_servers.news_digest]
+command = "wsl.exe"
+args = ["-d", "Ubuntu-26.04", "--cd", "/home/rootlulu/projects", ".venv-mcp/bin/python", "-m", "src.news_digest_mcp_server"]
+env = { NEWS_DIGEST_BASE_URL = "http://127.0.0.1:5173", PYTHONDONTWRITEBYTECODE = "1" }
+enabled_tools = [
+  "get_service_health",
+  "get_today_snapshot",
+  "get_news_snapshot",
+  "get_ai_news_snapshot",
+  "get_ai_projects_snapshot",
+  "get_stock_market_snapshot",
+  "get_stock_watchlist",
+  "get_stock_detail",
+  "get_financial_sources",
+  "get_company_financials",
+  "sync_company_financials",
+  "get_commodities_snapshot",
+  "get_energy_snapshot",
+  "get_consumption_snapshot",
+  "get_macro_snapshot",
+  "get_games_snapshot",
+  "get_games_region_snapshot",
+  "get_xueqiu_snapshot",
+  "list_influencers",
+  "get_corpus_status",
+  "start_influencer_crawl",
+  "get_crawl_status",
+  "cancel_crawl",
+  "search_xueqiu_evidence",
+  "read_xueqiu_evidence",
+  "get_xueqiu_media",
+]
+default_tools_approval_mode = "writes"
+startup_timeout_sec = 20
+tool_timeout_sec = 120

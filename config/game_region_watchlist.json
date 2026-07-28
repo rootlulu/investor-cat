@@ -1,0 +1,483 @@
+{
+  "schemaVersion": 3,
+  "description": "游戏「区域」子tab 固定游戏清单与地区列表。热销榜按地区取自 Steam 热销榜；在线人数趋势取自 Steam Charts / Steam 当前在线 API（全球并发口径）。纯手游（无 Steam appId）按项目规则显示「未披露」，不伪造数据。",
+  "games": [
+    {
+      "id": "black-myth-wukong",
+      "name": "Black Myth: Wukong",
+      "nameZh": "黑神话：悟空",
+      "publisher": "Game Science",
+      "group": "cn",
+      "platforms": [],
+      "aliases": [],
+      "appId": 2358720,
+      "sourceIds": {
+        "steam": [
+          "2358720"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "naraka-bladepoint",
+      "name": "Naraka: Bladepoint",
+      "nameZh": "永劫无间",
+      "publisher": "NetEase",
+      "group": "cn",
+      "platforms": [],
+      "aliases": [],
+      "appId": 1203220,
+      "sourceIds": {
+        "steam": [
+          "1203220"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "delta-force",
+      "name": "Delta Force",
+      "nameZh": "三角洲行动",
+      "publisher": "Team Jade / TiMi",
+      "group": "cn",
+      "platforms": [],
+      "aliases": [],
+      "appId": 2507950,
+      "sourceIds": {
+        "steam": [
+          "2507950"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "where-winds-meet",
+      "name": "Where Winds Meet",
+      "nameZh": "燕云十六声",
+      "publisher": "NetEase (Everstone)",
+      "group": "cn",
+      "platforms": [
+        "steam",
+        "console",
+        "mobile"
+      ],
+      "aliases": [],
+      "appId": 3564740,
+      "sourceIds": {
+        "steam": [
+          "3564740"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "wuthering-waves",
+      "name": "Wuthering Waves",
+      "nameZh": "鸣潮",
+      "publisher": "KURO GAMES",
+      "group": "cn",
+      "platforms": [],
+      "aliases": [],
+      "appId": 3513350,
+      "sourceIds": {
+        "steam": [
+          "3513350"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "marvel-rivals",
+      "name": "Marvel Rivals",
+      "nameZh": "漫威争锋",
+      "publisher": "NetEase",
+      "group": "cn",
+      "platforms": [],
+      "aliases": [],
+      "appId": 2767030,
+      "sourceIds": {
+        "steam": [
+          "2767030"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "once-human",
+      "name": "Once Human",
+      "nameZh": "七日世界",
+      "publisher": "NetEase",
+      "group": "cn",
+      "platforms": [],
+      "aliases": [],
+      "appId": 2139460,
+      "sourceIds": {
+        "steam": [
+          "2139460"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "torchlight-infinite",
+      "name": "Torchlight: Infinite",
+      "nameZh": "火炬之光：无限",
+      "publisher": "XD (心动网络)",
+      "group": "cn",
+      "platforms": [],
+      "aliases": [],
+      "appId": 1974050,
+      "sourceIds": {
+        "steam": [
+          "1974050"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "heartopia",
+      "name": "Heartopia",
+      "nameZh": "心动小镇",
+      "publisher": "XD International",
+      "group": "cn",
+      "platforms": [
+        "steam",
+        "mobile"
+      ],
+      "aliases": [],
+      "appId": 4025700,
+      "sourceIds": {
+        "steam": [
+          "4025700"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "genshin-impact",
+      "name": "Genshin Impact",
+      "nameZh": "原神",
+      "publisher": "miHoYo",
+      "group": "cn",
+      "platforms": [
+        "mobile",
+        "console",
+        "pc"
+      ],
+      "aliases": [],
+      "appId": null,
+      "sourceIds": {
+        "steam": [],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "honor-of-kings",
+      "name": "Honor of Kings",
+      "nameZh": "王者荣耀",
+      "publisher": "Tencent",
+      "group": "cn",
+      "platforms": [
+        "mobile"
+      ],
+      "aliases": [],
+      "appId": null,
+      "sourceIds": {
+        "steam": [],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "counter-strike-2",
+      "name": "Counter-Strike 2",
+      "nameZh": "反恐精英 2",
+      "publisher": "Valve",
+      "group": "global",
+      "platforms": [],
+      "aliases": [],
+      "appId": 730,
+      "sourceIds": {
+        "steam": [
+          "730"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "dota-2",
+      "name": "Dota 2",
+      "nameZh": "刀塔 2",
+      "publisher": "Valve",
+      "group": "global",
+      "platforms": [],
+      "aliases": [],
+      "appId": 570,
+      "sourceIds": {
+        "steam": [
+          "570"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "pubg-battlegrounds",
+      "name": "PUBG: BATTLEGROUNDS",
+      "nameZh": "绝地求生",
+      "publisher": "KRAFTON",
+      "group": "global",
+      "platforms": [],
+      "aliases": [],
+      "appId": 578080,
+      "sourceIds": {
+        "steam": [
+          "578080"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "grand-theft-auto-v-enhanced",
+      "name": "Grand Theft Auto V Enhanced",
+      "nameZh": "侠盗猎车手 5 增强版",
+      "publisher": "Rockstar",
+      "group": "global",
+      "platforms": [],
+      "aliases": [],
+      "appId": 3240220,
+      "sourceIds": {
+        "steam": [
+          "3240220"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "palworld",
+      "name": "Palworld",
+      "nameZh": "幻兽帕鲁",
+      "publisher": "Pocketpair",
+      "group": "global",
+      "platforms": [],
+      "aliases": [],
+      "appId": 1623730,
+      "sourceIds": {
+        "steam": [
+          "1623730"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "helldivers-2",
+      "name": "Helldivers 2",
+      "nameZh": "地狱潜者 2",
+      "publisher": "Sony",
+      "group": "global",
+      "platforms": [],
+      "aliases": [],
+      "appId": 553850,
+      "sourceIds": {
+        "steam": [
+          "553850"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "valheim",
+      "name": "Valheim",
+      "nameZh": "英灵神殿",
+      "publisher": "Iron Gate",
+      "group": "global",
+      "platforms": [],
+      "aliases": [],
+      "appId": 892970,
+      "sourceIds": {
+        "steam": [
+          "892970"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    },
+    {
+      "id": "path-of-exile-2",
+      "name": "Path of Exile 2",
+      "nameZh": "流放之路 2",
+      "publisher": "Grinding Gear Games",
+      "group": "global",
+      "platforms": [],
+      "aliases": [],
+      "appId": 2694490,
+      "sourceIds": {
+        "steam": [
+          "2694490"
+        ],
+        "sensorTower": [],
+        "qimai": [],
+        "diandian": []
+      }
+    }
+  ],
+  "regions": [
+    {
+      "code": "global",
+      "name": "全球"
+    },
+    {
+      "code": "cn",
+      "name": "中国"
+    },
+    {
+      "code": "us",
+      "name": "美国"
+    },
+    {
+      "code": "jp",
+      "name": "日本"
+    },
+    {
+      "code": "kr",
+      "name": "韩国"
+    },
+    {
+      "code": "de",
+      "name": "德国"
+    },
+    {
+      "code": "gb",
+      "name": "英国"
+    },
+    {
+      "code": "fr",
+      "name": "法国"
+    },
+    {
+      "code": "ca",
+      "name": "加拿大"
+    },
+    {
+      "code": "tw",
+      "name": "中国台湾"
+    },
+    {
+      "code": "hk",
+      "name": "中国香港"
+    },
+    {
+      "code": "au",
+      "name": "澳大利亚"
+    },
+    {
+      "code": "br",
+      "name": "巴西"
+    },
+    {
+      "code": "mx",
+      "name": "墨西哥"
+    },
+    {
+      "code": "it",
+      "name": "意大利"
+    },
+    {
+      "code": "es",
+      "name": "西班牙"
+    },
+    {
+      "code": "sa",
+      "name": "沙特"
+    },
+    {
+      "code": "ae",
+      "name": "阿联酋"
+    },
+    {
+      "code": "tr",
+      "name": "土耳其"
+    },
+    {
+      "code": "in",
+      "name": "印度"
+    },
+    {
+      "code": "id",
+      "name": "印尼"
+    },
+    {
+      "code": "th",
+      "name": "泰国"
+    },
+    {
+      "code": "vn",
+      "name": "越南"
+    },
+    {
+      "code": "sg",
+      "name": "新加坡"
+    },
+    {
+      "code": "my",
+      "name": "马来西亚"
+    },
+    {
+      "code": "ph",
+      "name": "菲律宾"
+    },
+    {
+      "code": "nl",
+      "name": "荷兰"
+    },
+    {
+      "code": "ch",
+      "name": "瑞士"
+    },
+    {
+      "code": "se",
+      "name": "瑞典"
+    },
+    {
+      "code": "pl",
+      "name": "波兰"
+    },
+    {
+      "code": "no",
+      "name": "挪威"
+    }
+  ]
+}
